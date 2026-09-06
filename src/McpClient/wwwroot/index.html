@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MCP Client</title>
+    <link rel="stylesheet" href="/lib/bootstrap/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/site.css" />
+</head>
+<body class="d-flex flex-column vh-100 overflow-hidden">
+
+<nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom flex-shrink-0">
+    <div class="container-fluid">
+        <a class="navbar-brand fw-semibold" href="#/chat">MCP Client</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="nav">
+            <ul class="navbar-nav me-auto">
+                <li class="nav-item"><a class="nav-link" data-route="/chat" href="#/chat">Chat</a></li>
+                <li class="nav-item"><a class="nav-link" data-route="/servers" href="#/servers">Servers</a></li>
+                <li class="nav-item"><a class="nav-link" data-route="/settings" href="#/settings">Settings</a></li>
+            </ul>
+            <div class="d-flex align-items-center gap-2" id="session"></div>
+        </div>
+    </div>
+</nav>
+
+<main id="view" class="container-fluid flex-grow-1 overflow-hidden d-flex flex-column py-3"></main>
+
+<!-- ------------------------------------------------------------------ chat -->
+<template id="tpl-chat">
+    <div class="row flex-grow-1 g-3 overflow-hidden">
+        <div class="col-lg-9 d-flex flex-column h-100">
+            <div id="messages" class="flex-grow-1 overflow-auto border rounded p-3 bg-body-tertiary"></div>
+            <form id="chat-form" class="mt-3 flex-shrink-0">
+                <div class="input-group">
+                    <textarea id="prompt" class="form-control" rows="2" placeholder="Send a message&hellip;"
+                              autocomplete="off" required></textarea>
+                    <button id="send" class="btn btn-primary px-4" type="submit">Send</button>
+                </div>
+                <div class="form-text d-flex justify-content-between">
+                    <span>Enter to send, Shift+Enter for a new line.</span>
+                    <button type="button" id="reset" class="btn btn-link btn-sm p-0">Clear conversation</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-lg-3 h-100">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>Activity</span>
+                    <span id="status" class="badge text-bg-secondary">idle</span>
+                </div>
+                <div id="activity" class="card-body overflow-auto small"></div>
+            </div>
+        </div>
+    </div>
+</template>
+
+<!-- --------------------------------------------------------------- servers -->
+<template id="tpl-servers">
+    <div class="overflow-auto">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h1 class="h4 mb-0">MCP servers</h1>
+            <div class="d-flex gap-2">
+                <button id="discover" class="btn btn-sm btn-outline-secondary" type="button">Discover enabled</button>
+                <button id="add-server" class="btn btn-sm btn-primary" type="button">Add server</button>
+            </div>
+        </div>
+        <div id="configuration-alert"></div>
+        <div id="configuration-list" class="border-top"></div>
+        <section id="capabilities" class="mt-4 d-none">
+            <h2 class="h5 mb-3">Capabilities</h2>
+            <div id="server-list"></div>
+        </section>
+
+        <div class="modal fade" id="server-editor" tabindex="-1" aria-labelledby="server-editor-title" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                    <form id="server-form">
+                        <div class="modal-header">
+                            <h2 class="modal-title fs-5" id="server-editor-title">Add MCP server</h2>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div id="server-form-error" class="alert alert-danger d-none"></div>
+                            <input id="server-id" type="hidden" />
+                            <div class="row g-3">
+                                <div class="col-md-5">
+                                    <label class="form-label" for="server-name">Name</label>
+                                    <input class="form-control" id="server-name" maxlength="100" required />
+                                </div>
+                                <div class="col-md-7">
+                                    <label class="form-label" for="server-endpoint">Endpoint</label>
+                                    <input class="form-control" id="server-endpoint" type="url" placeholder="https://localhost:7100/mcp" required />
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label" for="server-description">Description</label>
+                                    <input class="form-control" id="server-description" />
+                                </div>
+                                <div class="col-sm-4">
+                                    <label class="form-label" for="server-transport">Transport</label>
+                                    <select class="form-select" id="server-transport">
+                                        <option value="AutoDetect">Auto detect</option>
+                                        <option value="StreamableHttp">Streamable HTTP</option>
+                                        <option value="Sse">SSE</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-4">
+                                    <label class="form-label" for="server-token">Forward credential</label>
+                                    <select class="form-select" id="server-token">
+                                        <option value="AccessToken">Access token</option>
+                                        <option value="IdToken">ID token</option>
+                                        <option value="ApiKey">API key</option>
+                                        <option value="None">None</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-4">
+                                    <label class="form-label" for="server-timeout">Timeout (seconds)</label>
+                                    <input class="form-control" id="server-timeout" type="number" min="1" max="300" value="30" required />
+                                </div>
+                                <div class="col-sm-4" id="server-scheme-group">
+                                    <label class="form-label" for="server-scheme">Authorization scheme <span class="text-secondary">(prefix, optional)</span></label>
+                                    <input class="form-control" id="server-scheme" value="Bearer" />
+                                </div>
+                                <div class="col-sm-4 d-none" id="server-apikey-group">
+                                    <label class="form-label" for="server-apikey-header">API key header name</label>
+                                    <input class="form-control" id="server-apikey-header" value="X-Api-Key" />
+                                </div>
+                                <div class="col-sm-8 d-none" id="server-apikey-value-group">
+                                    <label class="form-label" for="server-apikey">API key</label>
+                                    <input class="form-control" id="server-apikey" type="password" autocomplete="off" placeholder="Enter API key (or leave blank to keep existing)" />
+                                </div>
+                                <div class="col-12 d-flex align-items-center pt-2">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" id="server-enabled" type="checkbox" checked />
+                                        <label class="form-check-label" for="server-enabled">Enabled</label>
+                                    </div>
+                                </div>
+                                <div class="col-12">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <label class="form-label mb-0">Additional headers</label>
+                                        <button class="btn btn-sm btn-outline-secondary" id="add-header" type="button">Add header</button>
+                                    </div>
+                                    <div id="server-headers" class="d-grid gap-2"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary" id="save-server">Save server</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal fade" id="capability-result" tabindex="-1" aria-labelledby="capability-result-title" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2 class="modal-title fs-5" id="capability-result-title">MCP result</h2>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <pre id="capability-result-body" class="mb-0 text-wrap"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>
+
+<!-- ---------------------------------------------------------------- signin -->
+<template id="tpl-signin">
+    <div class="d-flex flex-column align-items-center justify-content-center flex-grow-1 text-center">
+        <h1 class="h3">Sign in required</h1>
+        <p class="text-secondary">Authenticate to load MCP servers and use their tools with your own credential.</p>
+        <a class="btn btn-primary" id="signin">Sign in</a>
+    </div>
+</template>
+
+<!-- --------------------------------------------------------------- settings -->
+<template id="tpl-settings">
+    <div class="overflow-auto">
+        <h1 class="h4 mb-3">LLM settings</h1>
+        <div id="settings-alert"></div>
+        <form id="settings-form" class="col-lg-8">
+            <div class="row g-3">
+                <div class="col-12">
+                    <label class="form-label" for="llm-endpoint">Endpoint</label>
+                    <input class="form-control" id="llm-endpoint" type="url" placeholder="https://api.openai.com/v1" required />
+                    <div class="form-text">Any OpenAI-compatible endpoint, including Azure OpenAI's <code>/openai/v1</code> path.</div>
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label" for="llm-model">Model</label>
+                    <input class="form-control" id="llm-model" required />
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label" for="llm-apikey">API key</label>
+                    <input class="form-control" id="llm-apikey" type="password" autocomplete="off" placeholder="Leave blank to keep the current key" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label" for="llm-system-prompt">System prompt</label>
+                    <textarea class="form-control" id="llm-system-prompt" rows="3"></textarea>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label" for="llm-temperature">Temperature <span class="text-secondary">(optional)</span></label>
+                    <input class="form-control" id="llm-temperature" type="number" step="0.1" min="0" max="2" />
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label" for="llm-max-output">Max output tokens <span class="text-secondary">(optional)</span></label>
+                    <input class="form-control" id="llm-max-output" type="number" min="1" />
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label" for="llm-max-iterations">Max tool iterations</label>
+                    <input class="form-control" id="llm-max-iterations" type="number" min="1" required />
+                </div>
+            </div>
+            <div class="mt-3">
+                <button type="submit" class="btn btn-primary" id="save-settings">Save</button>
+            </div>
+        </form>
+    </div>
+</template>
+
+<script src="/lib/bootstrap/bootstrap.bundle.min.js"></script>
+<script type="module" src="/js/app.js?v=5"></script>
+</body>
+</html>

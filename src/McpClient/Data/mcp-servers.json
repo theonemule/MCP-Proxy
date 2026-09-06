@@ -1,0 +1,16 @@
+[
+  {
+    "id": "06164387fd914562b82fadeb7a6627b6",
+    "name": "MCP Proxy",
+    "description": null,
+    "endpoint": "http://localhost:5105/mcp",
+    "transportMode": "StreamableHttp",
+    "enabled": true,
+    "forwardToken": "AccessToken",
+    "authorizationScheme": "Bearer",
+    "apiKey": "",
+    "apiKeyHeaderName": "X-Api-Key",
+    "additionalHeaders": {},
+    "connectionTimeoutSeconds": 30
+  }
+]

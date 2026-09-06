@@ -1,0 +1,34 @@
+html,
+body {
+    height: 100%;
+}
+
+#view > .row {
+    min-height: 0;
+}
+
+.chat-bubble {
+    max-width: min(70ch, 85%);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+#activity pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 18rem;
+    overflow: auto;
+}
+
+.nav-link.active {
+    font-weight: 600;
+}
+
+.server-configuration + .server-configuration {
+    border-top: var(--bs-border-width) solid var(--bs-border-color);
+}
+
+.server-configuration .form-check-input {
+    width: 2.25rem;
+    height: 1.2rem;
+}

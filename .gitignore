@@ -1,0 +1,34 @@
+bin/
+obj/
+
+# IDE and local workspace files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Local environment and secret files
+.env
+.env.*
+!.env.example
+*.secrets.json
+
+# Runtime logs and temporary files
+*.log
+*.tmp
+proxy.err
+proxy.out
+
+# Test, coverage, and publish output
+TestResults/
+coverage/
+publish/
+
+# Local databases and SQLite sidecars
+*.db
+*.db-shm
+*.db-wal
+
+# Local Docker overrides
+docker-compose.override.yml

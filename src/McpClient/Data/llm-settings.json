@@ -1,0 +1,9 @@
+{
+  "endpoint": "https://ragged-openai-25201.openai.azure.com/openai/v1",
+  "apiKey": "",
+  "model": "gpt-5.6-terra",
+  "systemPrompt": "You are a helpful assistant with access to tools exposed by MCP servers. Use the tools when they help answer the user\u0027s request, and explain what you did.",
+  "temperature": null,
+  "maxOutputTokens": null,
+  "maxToolIterations": 10
+}

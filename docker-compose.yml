@@ -1,0 +1,55 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5105:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Database__Provider: Postgres
+      Database__PostgresConnectionString: Host=postgres;Port=5432;Database=mcp_proxy;Username=mcp_proxy;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      Cache__Enabled: "true"
+      Cache__Provider: Redis
+      Cache__ConnectionString: redis:6379
+      Bootstrap__AdminUsername: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      Bootstrap__AdminPassword: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
+      MCP_PROXY_OIDC_CLIENT_SECRET: ${MCP_PROXY_OIDC_CLIENT_SECRET:?Set MCP_PROXY_OIDC_CLIENT_SECRET}
+      Auth__SigningKey: ${AUTH_SIGNING_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: mcp_proxy
+      POSTGRES_USER: mcp_proxy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - proxy-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_proxy -d mcp_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - proxy-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  proxy-postgres:
+  proxy-redis:
