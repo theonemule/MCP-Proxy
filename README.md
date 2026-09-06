@@ -1,3 +1,5 @@
+# THIS IS STILL VERY MUCH BETA, BUT PLEASE FEEL FREE TO USE, CREATE, and SEND PRS.
+
 # MCP Proxy User Guide
 
 MCP Proxy gives people and applications one controlled way to use tools, resources, and prompts from multiple Model Context Protocol (MCP) servers.
