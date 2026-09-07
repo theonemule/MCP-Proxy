@@ -374,7 +374,342 @@ For each instance:
 
 Each instance keeps a local copy of the latest downstream catalog for speed. When one instance synchronizes a server, Redis notifies the other instances to refresh their local copies.
 
-## 7. Authentication Setup
+## 6.6 Database configuration guide
+
+The database stores the durable configuration and security state of the proxy. It is not just a
+temporary cache. Treat it as important application data and back it up in production.
+
+### SQLite
+
+SQLite is the default because it is simple and requires no separate service. It stores the proxy
+database in a local file:
+
+```json
+"Database": {
+  "Provider": "Sqlite",
+  "SqliteConnectionString": "Data Source=mcp-proxy.db"
+}
+```
+
+Use SQLite for development, demonstrations, and a single proxy process. Do not use one SQLite file
+as the shared database for multiple containers or multiple machines.
+
+### PostgreSQL
+
+Set the provider and a PostgreSQL connection string through environment variables:
+
+```powershell
+$env:Database__Provider = "Postgres"
+$env:Database__PostgresConnectionString = "Host=db.example.com;Port=5432;Database=mcp_proxy;Username=mcp_proxy;Password=replace-me;SSL Mode=Require"
+```
+
+The database user needs permission to connect and create the application's tables on first startup.
+For production, create the database and user ahead of time, use TLS, restrict network access, and
+keep the password in a secret manager or protected environment variable.
+
+### SQL Server
+
+Set the SQL Server provider and connection string:
+
+```powershell
+$env:Database__Provider = "SqlServer"
+$env:Database__SqlServerConnectionString = "Server=sql.example.com;Database=McpProxy;User Id=mcp_proxy;Password=replace-me;Encrypt=True;TrustServerCertificate=False"
+```
+
+Windows-integrated authentication can be used when the container or service account is configured
+for it. In every case, use encrypted connections in production and grant the application only the
+database permissions it needs.
+
+### Choosing connection-string settings
+
+The provider-specific setting wins. If it is empty, the proxy falls back to `Database:ConnectionString`.
+The older `ConnectionStrings:ProxyDatabase` setting is not the primary setting for provider selection.
+
+### Database startup and initialization
+
+On startup, the proxy checks the database and creates the required schema if it does not exist. On a
+new database it can create the configured bootstrap administrator. On an existing database it does
+not overwrite users or roles. Database initialization is not a migration strategy; review your
+deployment process before applying schema changes to an existing production database.
+
+### Database checklist
+
+- Choose one provider for all proxy nodes.
+- Point every node at the same database.
+- Use a dedicated database and account.
+- Protect the connection string.
+- Enable encrypted connections outside local development.
+- Back up the database.
+- Verify restore procedures.
+- Do not delete the database to solve a login problem unless it is disposable development data.
+
+## 6.7 Redis configuration guide
+
+Redis is optional. With the default memory configuration, each proxy process keeps its own cache and
+its own in-process catalog refresh notifications. With Redis enabled, the proxy uses Redis for
+distributed cache registration and for notifications that keep local catalogs on multiple nodes in
+sync.
+
+### Local Redis
+
+```powershell
+$env:Cache__Enabled = "true"
+$env:Cache__Provider = "Redis"
+$env:Cache__ConnectionString = "127.0.0.1:6379"
+```
+
+### Redis with authentication and TLS
+
+Use the connection-string syntax supported by your Redis deployment. For example, a managed Redis
+service commonly requires a hostname, port, password, and TLS option. Do not place the password in a
+checked-in settings file.
+
+### What Redis does and does not do
+
+Redis helps nodes coordinate. When one node successfully synchronizes a downstream MCP server, it
+publishes that server's ID. Other nodes receive the notification and refresh their local catalog.
+
+Redis does not replace PostgreSQL or SQL Server. The shared database remains the source of truth for
+registered servers, users, roles, permissions, API keys, and claim mappings.
+
+### Redis deployment checklist
+
+- Use the same Redis endpoint for every proxy node.
+- Use the same Redis logical database where required by your environment.
+- Protect Redis with authentication and TLS when it leaves the local machine.
+- Allow pub/sub traffic between proxy nodes and Redis.
+- Monitor memory, connection limits, and availability.
+- Use a persistent Redis configuration appropriate to your recovery requirements.
+- Confirm that a server synchronization on one node causes other nodes to refresh.
+
+## 7. Authentication and Authorization Guides
+
+Authentication and authorization are related but different:
+
+- **Authentication (AuthN)** answers: “Who is this caller?”
+- **Authorization (AuthZ)** answers: “What may this caller do?”
+
+The proxy supports both. You can use OIDC only for identity and leave detailed access decisions to a
+different layer, or you can use OIDC together with the proxy's roles and permissions.
+
+### 7.1 OIDC for authentication only
+
+Use this model when another system controls authorization, or when every authenticated identity is
+allowed to reach the same proxy surface.
+
+In this mode:
+
+1. The identity provider signs the user in.
+2. The proxy validates the OIDC token.
+3. The proxy knows the caller is authenticated.
+4. Access decisions are made by the route or downstream system rather than by detailed proxy role mappings.
+
+Configure the identity settings:
+
+```text
+Auth:Enabled=true
+Auth:Mode=Oidc
+Auth:Authority=https://your-identity-provider/tenant/v2.0
+Auth:Audience=your-proxy-api-audience
+Auth:ClientId=your-proxy-client-id
+Auth:ClientSecret=env:MCP_PROXY_OIDC_CLIENT_SECRET
+```
+
+Use this mode only when the endpoints you expose do not require per-user or per-tool restrictions.
+Authentication proves identity; it does not automatically grant the proxy's administrator flags or
+MCP permissions.
+
+### 7.2 OIDC with proxy authorization
+
+Use this model when the proxy must decide which people and applications may manage servers or use
+specific MCP capabilities.
+
+The flow is:
+
+1. The identity provider authenticates the caller.
+2. The proxy validates the token.
+3. The proxy reads claims such as roles, groups, subject, and name.
+4. Claim mappings and optional linked-user records produce effective proxy roles.
+5. Those roles determine administration scopes and MCP capability permissions.
+
+Configure OIDC as above, then create proxy roles and map identity claims to them. For example:
+
+```text
+Identity-provider claim: roles=ProxyServerAdministrator
+Proxy role:             ServerOperators
+Proxy flag:             IsServerAdmin=true
+```
+
+For MCP access, assign either a server-wide permission or individual tool/resource/prompt permissions
+to the mapped role.
+
+This model is appropriate when:
+
+- Different teams need different downstream servers.
+- Some tools are more sensitive than others.
+- Only designated people may administer the proxy.
+- Automation needs narrow, independently revocable access.
+
+### 7.3 Azure Entra ID guide
+
+The following guide describes the Azure Entra setup for both the proxy and the test client.
+
+#### Create the proxy app registration
+
+In Microsoft Entra admin center:
+
+1. Open **App registrations**.
+2. Select **New registration**.
+3. Give the application a name such as `MCP Proxy`.
+4. Choose the supported account type appropriate to your organization.
+5. Add a web redirect URI. For local HTTP development use:
+   `http://localhost:5105/signin-oidc`.
+6. Create the registration and record the **Application (client) ID** and **Directory (tenant) ID**.
+
+For a production HTTPS deployment, use the real HTTPS callback URL instead of the local HTTP URL.
+Redirect URIs must match the scheme, host, port, and path used by the running proxy.
+
+#### Create the proxy client secret
+
+1. Open the proxy app registration.
+2. Open **Certificates & secrets**.
+3. Select **New client secret**.
+4. Choose an expiration period consistent with your rotation policy.
+5. Copy the **Value** immediately.
+
+The value is shown only when the secret is created. The **Secret ID** is not the value needed by the
+application.
+
+Set the value without committing it:
+
+```powershell
+$env:MCP_PROXY_OIDC_CLIENT_SECRET = "copy-the-secret-value-here"
+```
+
+If Azure returns `AADSTS7000215`, verify that the running process has the current secret value, not
+the secret ID or an expired value.
+
+#### Configure the proxy API audience
+
+For a proxy API that uses an `api://...` audience:
+
+1. Open **Expose an API** on the proxy registration.
+2. Set or confirm the Application ID URI.
+3. Add a delegated scope such as `mcp.access` if the client needs delegated access.
+4. Record the complete scope value for the client configuration.
+
+The proxy's `Auth:Audience` must match the audience contained in access tokens sent to the proxy.
+
+#### Create Azure app roles for authorization
+
+If Azure should provide role claims:
+
+1. Open **App roles** on the proxy registration.
+2. Create roles such as `ProxyGlobalAdministrator`, `ProxyServerAdministrator`, or `ProxyUserAdministrator`.
+3. Set the allowed member type to users/groups, applications, or both as appropriate.
+4. Assign users or groups to the app roles through **Enterprise applications**.
+5. Confirm that the resulting token contains a `roles` claim.
+
+In the proxy administration area, map each Azure role value to the matching proxy role. The Azure
+role claim identifies the external identity; the proxy role determines the actual proxy permissions.
+
+#### Create the client app registration
+
+Create a separate registration for `McpClient`:
+
+1. Add a web redirect URI such as `http://localhost:5256/signin-oidc`.
+2. Create a client secret and copy its **Value**.
+3. Add delegated permission for the proxy API scope under **API permissions**.
+4. Grant admin consent if your tenant requires it.
+5. Configure the client with its own client ID and secret.
+
+```powershell
+$env:MCP_CLIENT_OIDC_CLIENT_SECRET = "client-secret-value"
+```
+
+The proxy and client use different application registrations and different redirect URIs.
+
+#### Azure validation checklist
+
+- Tenant ID is correct.
+- Authority includes the correct tenant and `/v2.0` endpoint where applicable.
+- Proxy client ID is the proxy registration's application ID.
+- Client client ID is the client registration's application ID.
+- Secret values are current and not secret IDs.
+- Proxy redirect URI matches `5105` during local development.
+- Client redirect URI matches `5256` during local development.
+- The proxy audience matches the access-token audience.
+- The client requests the proxy delegated scope.
+- App-role assignments exist for intended users or groups.
+- Claim mappings use the exact role or group claim value.
+- Users sign in again after role or permission changes.
+
+## 8. Logging configuration guide
+
+Logging helps operators answer four questions:
+
+1. Did the proxy start correctly?
+2. Can it reach the database, Redis, and downstream servers?
+3. Did authentication or authorization reject a request?
+4. Did a downstream MCP call or catalog synchronization fail?
+
+### Providers
+
+The built-in provider choices are:
+
+- `Console`: recommended for containers and local development because the platform can collect stdout/stderr.
+- `Debug`: useful when attached to a debugger.
+- `EventSource`: useful for Windows and .NET diagnostic tooling.
+- `None`: disables the configured application provider and should be used cautiously.
+
+Configure the provider and minimum level:
+
+```json
+"LoggingOptions": {
+  "Provider": "Console",
+  "MinimumLevel": "Information",
+  "ApplicationName": "mcp-proxy"
+}
+```
+
+The standard levels are:
+
+- `Trace`: extremely detailed diagnostics.
+- `Debug`: developer diagnostics.
+- `Information`: normal lifecycle and integration events.
+- `Warning`: unexpected but recoverable conditions.
+- `Error`: failed operations.
+- `Critical`: failures requiring immediate attention.
+
+Use `Information` during normal operation, `Warning` when reducing noise, and `Debug` or `Trace` only
+temporarily while investigating a problem. Do not enable verbose logging indefinitely in production.
+
+### What to look for
+
+- Startup logs show the application listening and the hosting environment.
+- Database logs show connection and schema initialization problems.
+- Catalog logs identify downstream synchronization failures.
+- Authentication logs identify OIDC token or client-secret failures.
+- Authorization failures should be investigated together with the caller's roles and claim mappings.
+- Redis connection or pub/sub failures explain stale catalogs across nodes.
+
+The application should not log complete passwords, client secrets, API keys, or bearer tokens. Review
+custom downstream and logging integrations to preserve that rule.
+
+### Container logging
+
+For Docker, keep the proxy logging to Console and collect container output with the platform's log
+driver or centralized logging system. Use:
+
+```powershell
+docker compose logs -f proxy
+```
+
+For a managed logging service, use the hosting platform's .NET logging integration or add a provider
+at deployment time. Keep application services independent of a specific vendor.
+
+
+## 9. Authentication Setup
 
 ### 7.1 Local login
 
@@ -451,7 +786,7 @@ To give an external identity access without creating a local user:
 
 Claim values are matched case-insensitively. If the provider emits a group object ID, map the object ID rather than the display name.
 
-## 8. Using the Administration Website
+## 10. Using the Administration Website
 
 Open the proxy URL in a browser and sign in. The administration website is the control center for the deployment.
 
@@ -543,7 +878,7 @@ A successful synchronization updates the last-synchronized timestamp. A failure 
 
 Give a trusted role server-wide access when it may safely use all capabilities. Give a restricted role individual tool, resource, or prompt permissions when it should use only selected operations.
 
-## 9. Connecting to the Proxy MCP Endpoint
+## 11. Connecting to the Proxy MCP Endpoint
 
 A compatible MCP client connects to:
 
@@ -567,7 +902,7 @@ http://localhost:5105/servers/{namespacePrefix}/mcp
 
 This limits requests to one server namespace but does not bypass authorization.
 
-## 10. Configuring and Using the Browser Client
+## 12. Configuring and Using the Browser Client
 
 ### 10.1 Add the proxy as a client server
 
@@ -635,7 +970,7 @@ The client discovery view reports:
 
 Some servers expose tools but not resources or prompts. A missing capability category does not necessarily mean the server is broken.
 
-## 11. Configuration Reference
+## 13. Configuration Reference
 
 ### 11.1 Proxy settings
 
@@ -695,7 +1030,7 @@ $env:Cache__Enabled = "true"
 | `Mcp:ClientName` | Client name sent during MCP initialization. |
 | `Mcp:ClientVersion` | Client version sent during MCP initialization. |
 
-## 12. Secret Safety
+## 14. Secret Safety
 
 Never commit these values:
 
@@ -726,7 +1061,7 @@ Secrets are resolved during startup. Restart after changing one.
 
 `AADSTS7000215: Invalid client secret` usually means the value is expired, revoked, from another application registration, or the secret ID was supplied instead of the secret value.
 
-## 13. Production Guidance
+## 15. Production Guidance
 
 For a production deployment:
 
@@ -745,7 +1080,7 @@ For a production deployment:
 - Rotate secrets and credentials according to organizational policy.
 - Test failover and recovery before relying on multiple nodes for availability.
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 ### The proxy does not start
 
@@ -824,7 +1159,7 @@ Check that:
 - The prefix matches the downstream server's expectation.
 - The credential is valid and has not expired.
 
-## 15. Data Reset and Recovery
+## 17. Data Reset and Recovery
 
 The proxy database contains durable users, roles, permissions, API keys, claim mappings, and server registrations. Do not delete it casually.
 
@@ -832,7 +1167,7 @@ The client stores settings under its `Data` directory. Conversation history is h
 
 For a disposable local reset, stop the application and remove the local SQLite database only when losing its data is acceptable. A shared PostgreSQL or SQL Server database should be reset only through an intentional administrative process.
 
-## 16. Further Documentation
+## 18. Further Documentation
 
 - This file, [README.md](README.md), is the complete user and administrator guide.
 - [README.DEVELOPER.md](README.DEVELOPER.md) is the separate complete developer guide covering architecture, source-level contracts, APIs, testing, security implementation, and extension points.

@@ -12,5 +12,19 @@
     "apiKeyHeaderName": "X-Api-Key",
     "additionalHeaders": {},
     "connectionTimeoutSeconds": 30
+  },
+  {
+    "id": "ms-learn",
+    "name": "Microsoft Learn MCP Server",
+    "description": "Microsoft Learn documentation search and retrieval.",
+    "endpoint": "https://learn.microsoft.com/api/mcp",
+    "transportMode": "StreamableHttp",
+    "enabled": true,
+    "forwardToken": "None",
+    "authorizationScheme": "Bearer",
+    "apiKey": "",
+    "apiKeyHeaderName": "X-Api-Key",
+    "additionalHeaders": {},
+    "connectionTimeoutSeconds": 30
   }
 ]

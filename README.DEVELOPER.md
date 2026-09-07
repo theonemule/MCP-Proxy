@@ -107,6 +107,96 @@ Redis subscribers listen on `mcp-proxy:catalog-invalidated`. A successful refres
 
 `LoggingOptions` controls minimum level and built-in provider selection. Current providers are Console, Debug, EventSource, and None. The options object leaves room for a future syslog, Seq, Application Insights, or structured logging adapter.
 
+### Database provider behavior
+
+`Program.cs` binds `DatabaseOptions` and selects the EF Core provider during service registration:
+
+- `DatabaseProvider.Sqlite` calls `UseSqlite`.
+- `DatabaseProvider.SqlServer` calls `UseSqlServer`.
+- `DatabaseProvider.Postgres` calls `UseNpgsql`.
+
+`DatabaseOptions.GetConnectionString()` selects the provider-specific setting and falls back to the
+generic `ConnectionString`. `DatabaseSeeder` uses `EnsureCreatedAsync`; this is suitable for the
+current initialization model but is not a replacement for a versioned migration pipeline in a mature
+production deployment.
+
+The Docker Compose profile uses PostgreSQL as a shared database. The application does not create a
+separate schema per node; all nodes use the same EF model and database state.
+
+### Redis provider behavior
+
+When `Cache:Enabled` is true, `Cache:Provider` is `Redis`, and a connection string is present,
+startup registers `AddStackExchangeRedisCache` and `RedisCatalogInvalidationBus`. Redis pub/sub uses
+the fixed channel `mcp-proxy:catalog-invalidated`. The message body is a server GUID.
+
+`CatalogCache.RefreshOneAsync` publishes after a successful downstream refresh. A receiving node
+loads the matching enabled server from its shared database and refreshes its local catalog with
+publishing disabled, preventing notification loops. Memory mode registers
+`InMemoryCatalogInvalidationBus` and is appropriate only for process-local coordination.
+
+### OIDC authentication-only versus authorization-enabled deployments
+
+The code supports two operational interpretations of OIDC:
+
+1. **Authentication-only**: OIDC establishes an authenticated principal. The deployment may place
+  authorization at another boundary or expose only uniformly protected routes. The token is still
+  validated by the proxy, but no assumption should be made that arbitrary OIDC roles automatically
+  become proxy permissions.
+2. **Authentication plus authorization**: `PermissionService` combines principal claims with
+  `UserRole`, `ApiKeyRole`, and `ClaimRoleMapping` data. Claim mappings can grant proxy roles to an
+  external principal without a local `User` row. Linked external subjects additionally receive the
+  local user's direct roles.
+
+This distinction matters because OIDC token validation alone does not grant `IsGlobalAdmin`,
+`IsUserAdmin`, `IsServerAdmin`, or MCP capability permissions. Those are proxy authorization data.
+
+### Azure Entra integration details
+
+For Entra, the proxy registration needs an authorization-code redirect URI matching
+`/signin-oidc`, an audience matching the access token's `aud` claim, and a client secret **value**.
+The client registration needs its own redirect URI and delegated permission for the proxy API scope.
+
+Recommended Entra mapping flow:
+
+1. Define app roles on the proxy registration.
+2. Assign users/groups or applications to those app roles in the enterprise application.
+3. Confirm the resulting access or ID token contains the expected `roles` claim.
+4. Create a proxy `Role` representing the desired authorization.
+5. Create a `ClaimRoleMapping` for `roles` and the exact Entra app-role value.
+6. Test both authentication and the intended proxy scope with a newly issued token.
+
+The proxy deliberately does not treat an arbitrary incoming `roles` claim as an administrator role
+until an explicit database mapping exists. This prevents identity-provider role names from silently
+becoming proxy privileges.
+
+### Logging provider behavior
+
+`Program.cs` clears the default providers, parses `LoggingOptions.MinimumLevel` as a standard
+`Microsoft.Extensions.Logging.LogLevel`, then selects the configured built-in provider:
+
+- `Console` uses a single-line timestamped console logger.
+- `Debug` registers the .NET debug logger.
+- `EventSource` registers the EventSource logger.
+- `None` registers no application provider.
+
+The `Preset`, `SyslogHost`, `SyslogPort`, and `ApplicationName` properties are configuration
+contracts for deployment/provider expansion; the current startup path uses `Provider` and
+`MinimumLevel`. Do not log secret values, bearer tokens, complete API keys, or passwords from a new
+provider.
+
+### Default Microsoft Learn server
+
+The client registry includes an enabled entry for:
+
+```text
+https://learn.microsoft.com/api/mcp
+```
+
+It uses Streamable HTTP and `ForwardToken.None`, so no user credential or API key is sent by default.
+The entry is in `src/McpClient/Data/mcp-servers.json` and can be disabled or removed through the
+client configuration workflow. The proxy may also register Microsoft Learn as a downstream server
+through its administration API when the service should expose it to other MCP clients.
+
 ## Client Project
 
 `McpClient` is a separate ASP.NET Core application. It uses cookie authentication with OpenID Connect and protects `/api` routes when `Oidc:Enabled` is true.
