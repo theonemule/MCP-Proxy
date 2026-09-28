@@ -89,6 +89,7 @@ builder.Services.AddSingleton<CatalogCache>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CatalogCache>());
 builder.Services.AddScoped<GatewayService>();
 builder.Services.AddScoped<ModelRouterService>();
+builder.Services.AddScoped<OpenAiCompatibilityService>();
 builder.Services.AddScoped<NativeModelProxyService>();
 
 var signingKeyBytes = !string.IsNullOrWhiteSpace(authOptions.SigningKey)
@@ -115,12 +116,42 @@ if (authOptions.Enabled)
                 return ApiKeyAuthenticationOptions.SchemeName;
             }
 
-            if (context.Request.Headers.ContainsKey("Authorization"))
+            if (context.Request.Headers.TryGetValue("Authorization", out var authorization))
             {
+                if (ApiKeyGenerator.TryGetBearerApiKey(authorization.ToString(), out _))
+                {
+                    return ApiKeyAuthenticationOptions.SchemeName;
+                }
+
                 return JwtBearerDefaults.AuthenticationScheme;
             }
 
             return CookieAuthenticationDefaults.AuthenticationScheme;
+        };
+    });
+
+    authentication.AddPolicyScheme("OpenAiSmart", "OpenAI API key or bearer token", options =>
+    {
+        options.ForwardDefaultSelector = context =>
+        {
+            if (context.Request.Headers.ContainsKey(authOptions.ApiKeyHeaderName))
+            {
+                return ApiKeyAuthenticationOptions.SchemeName;
+            }
+
+            if (context.Request.Headers.TryGetValue("Authorization", out var authorization))
+            {
+                if (ApiKeyGenerator.TryGetBearerApiKey(authorization.ToString(), out _))
+                {
+                    return ApiKeyAuthenticationOptions.SchemeName;
+                }
+
+                return JwtBearerDefaults.AuthenticationScheme;
+            }
+
+            // OpenAI clients authenticate with Bearer API keys; use the API-key scheme for a
+            // clean 401 challenge rather than falling through to a browser cookie redirect.
+            return ApiKeyAuthenticationOptions.SchemeName;
         };
     });
 
@@ -409,6 +440,7 @@ app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapAdminEndpoints();
 app.MapModelRouterEndpoints(authOptions.Enabled);
+app.MapOpenAiCompatibilityEndpoints(authOptions.Enabled);
 
 // The combined endpoint carries no scope; the per-server endpoint's route value is read by
 // McpEndpointScope and narrows every handler above to that one server's catalog.

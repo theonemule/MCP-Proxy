@@ -281,7 +281,7 @@ function addServerModalHtml(server) {
 // ---- Models ----
 
 const MODEL_PROVIDER_KIND = {
-  0: "OpenAI compatible",
+  0: "OpenAI API compatible",
   1: "Ollama",
   2: "AWS Bedrock",
   3: "Generic HTTP"
@@ -325,7 +325,7 @@ function renderModels() {
   el("tab-models").innerHTML =
     pageHeader("bi-cpu", "Model Router",
       '<div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" data-action="open-add-model-route"><i class="bi bi-signpost me-1"></i>Add Model Route</button><button class="btn btn-sm btn-primary" data-action="open-add-model-provider"><i class="bi bi-plus-lg me-1"></i>Add Provider</button></div>') +
-    `<p class="text-muted small">Unified API: <code>POST ${escapeHtml(location.origin)}/models/chat</code>. Set <code>stream: true</code> for normalized SSE, or use <code>/models/chat/stream</code>. Native provider APIs are exposed under <code>/models/native/{provider}/...</code> with the provider-specific path, method, query string, and streaming response preserved.</p>
+    `<p class="text-muted small">OpenAI-compatible API: <code>/v1</code> with <code>GET /v1/models</code> and <code>POST /v1/chat/completions</code>, including OpenAI SSE streaming. The older <code>/models/chat</code> endpoint remains for compatibility. Native provider APIs remain under <code>/models/native/{provider}/...</code>.</p>
     <h6 class="mt-3">Providers</h6>` +
     (state.modelProviders.length ? `
       <table class="table table-sm align-middle bg-white">

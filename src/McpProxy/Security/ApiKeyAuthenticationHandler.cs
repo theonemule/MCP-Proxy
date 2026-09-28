@@ -30,12 +30,24 @@ public sealed class ApiKeyAuthenticationHandler(
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         var headerName = authOptions.Value.ApiKeyHeaderName;
-        if (!Request.Headers.TryGetValue(headerName, out var presented) || presented.Count == 0)
+        string? presentedKey = null;
+
+        if (Request.Headers.TryGetValue(headerName, out var presented) && presented.Count > 0)
+        {
+            presentedKey = presented.ToString();
+        }
+        else if (Request.Headers.Authorization.Count > 0 &&
+                 ApiKeyGenerator.TryGetBearerApiKey(Request.Headers.Authorization.ToString(), out var bearer))
+        {
+            presentedKey = bearer;
+        }
+
+        if (string.IsNullOrWhiteSpace(presentedKey))
         {
             return AuthenticateResult.NoResult();
         }
 
-        if (!ApiKeyGenerator.TrySplit(presented.ToString(), out var prefix, out var secret))
+        if (!ApiKeyGenerator.TrySplit(presentedKey, out var prefix, out var secret))
         {
             return AuthenticateResult.Fail("Malformed API key.");
         }
@@ -60,6 +72,29 @@ public sealed class ApiKeyAuthenticationHandler(
         var identity = new ClaimsIdentity(claims, ApiKeyAuthenticationOptions.SchemeName);
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), ApiKeyAuthenticationOptions.SchemeName);
         return AuthenticateResult.Success(ticket);
+    }
+
+    /// <summary>Returns an OpenAI-shaped 401 for the OpenAI-compatible API surface.</summary>
+    protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        if (Request.Path.StartsWithSegments("/v1"))
+        {
+            Response.StatusCode = StatusCodes.Status401Unauthorized;
+            Response.ContentType = "application/json; charset=utf-8";
+            await Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    message = "Incorrect API key provided.",
+                    type = "invalid_request_error",
+                    param = (string?)null,
+                    code = "invalid_api_key"
+                }
+            });
+            return;
+        }
+
+        await base.HandleChallengeAsync(properties);
     }
 }
 
