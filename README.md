@@ -1182,65 +1182,130 @@ Downstream connections also use the 2.x MCP client and are not pinned to a legac
 
 The gateway continues to proxy tools, resources, and prompts through the same RBAC boundary. Protocol lifecycle and transport-version differences are handled by the MCP SDK rather than leaking into provider registrations.
 
-## 20. Model Router
+## 20. OpenAI-Compatible Model Gateway
 
-MCP Proxy can also act as a secured model gateway. A model provider represents a downstream hosting platform, while a model route gives a provider-specific model a stable public name.
+MCP Proxy uses the OpenAI v1 API as the primary northbound convergence contract for model inference. Applications can use an OpenAI client library against the gateway while the gateway selects an authorized public model route and adapts the request to the configured provider.
 
-Supported provider modes are:
-
-- **OpenAI compatible** for services that expose a chat-completions-compatible API, including compatible Microsoft Foundry deployments and Open WebUI-style gateways.
-- **Ollama** for the native `/api/chat` protocol.
-- **AWS Bedrock** through the Bedrock Runtime Converse API with AWS Signature Version 4.
-- **Generic HTTP** for native pass-through when no unified chat adapter is required.
-
-The administration website includes a **Models** tab where administrators can register providers, create public model aliases, and grant model access to roles. Model-provider administration uses the existing MCP/server administration scope. Model access grants use the user/permission administration scope.
-
-### 20.1 Unified model API
-
-The normalized endpoint is:
+The primary model API is:
 
 ```text
-POST /models/chat
+GET  /v1/models
+GET  /v1/models/{model}
+POST /v1/chat/completions
 ```
 
-The same endpoint supports buffered JSON or streaming Server-Sent Events (SSE). Set `"stream": true` to stream, or use the explicit `POST /models/chat/stream` alias. Streaming responses emit `start`, `delta`, optional `usage`, `done`, and `error` events. Each `delta` carries incremental assistant text and each event identifies the public model, provider, and downstream model.
+`GET /v1/models` returns only model aliases visible to the authenticated caller and uses the OpenAI model-list contract. Each public alias is returned as an OpenAI model ID, so applications never need to know the provider-native deployment or model identifier.
 
-A request contains the public model alias, user prompt, optional system prompt, and an object of additional provider parameters:
+`POST /v1/chat/completions` accepts the OpenAI Chat Completions request shape, including `messages`, `stream`, `stream_options`, sampling parameters, function tools, tool choice, and provider-specific optional fields when the downstream provider is itself OpenAI-compatible.
+
+### 20.1 OpenAI SDK usage
+
+Gateway API keys can be sent exactly as OpenAI SDKs expect:
+
+```text
+Authorization: Bearer mcp_<prefix>.<secret>
+```
+
+For Python:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://gateway.example/v1",
+    api_key="mcp_<prefix>.<secret>",
+)
+
+models = client.models.list()
+
+completion = client.chat.completions.create(
+    model="fast-coder",
+    messages=[
+        {"role": "developer", "content": "Keep the answer concise."},
+        {"role": "user", "content": "Explain this function."},
+    ],
+    temperature=0.2,
+)
+
+print(completion.choices[0].message.content)
+```
+
+No gateway-specific request object is required. Existing bearer JWT authentication remains available, and the configured legacy API-key header remains supported outside clients that prefer the OpenAI bearer convention.
+
+### 20.2 Streaming
+
+Streaming uses the OpenAI Chat Completions SSE contract:
 
 ```json
 {
   "model": "fast-coder",
-  "systemPrompt": "Keep the answer concise.",
-  "prompt": "Explain this function.",
+  "messages": [
+    {"role": "user", "content": "Explain this function."}
+  ],
   "stream": true,
-  "parameters": {
-    "temperature": 0.2,
-    "max_tokens": 800
+  "stream_options": {
+    "include_usage": true
   }
 }
 ```
 
-The gateway resolves `fast-coder` to its configured provider and downstream model ID. Clients therefore do not need to know whether that model is hosted by Ollama, Foundry, Bedrock, or another compatible provider.
-
-`GET /models/` returns only the public model aliases the authenticated caller is allowed to use.
-
-For OpenAI-compatible providers, extra parameters are passed through except for the gateway-owned `model`, `messages`, and `stream` fields. For Ollama, common native fields stay at the top level and other values are placed under `options`. For Bedrock, standard inference values such as maximum tokens, temperature, top-p, and stop sequences are mapped to `inferenceConfig`; other values are sent as `additionalModelRequestFields`.
-
-Unified streaming is implemented using each provider's native streaming mechanism: OpenAI-compatible SSE, Ollama's streaming NDJSON response, and Bedrock `ConverseStream`. Bedrock EventStream frames are decoded and normalized into the gateway SSE contract. The native provider proxy remains a byte-streaming pass-through, so provider-specific streaming APIs are also available without normalization.
-
-### 20.2 Native provider proxy
-
-When an application already speaks a provider's native API, use:
+The response consists of `data:` records containing `chat.completion.chunk` objects and terminates with:
 
 ```text
-/models/native/{provider-slug}/{provider-path}
+data: [DONE]
 ```
 
-The gateway preserves the downstream HTTP method, remaining path, query string, request body, response status, response headers, and response body. The gateway's own bearer token, API key, cookies, forwarding headers, and other hop-by-hop credentials are stripped before forwarding. The configured downstream credential is added only after that sanitization step.
+For an OpenAI-compatible downstream provider, the gateway forwards the streaming contract directly and rewrites only the model identity from the private downstream model ID to the authorized public alias.
 
-A **provider-wide** model permission is required for native proxy access because an arbitrary native path cannot safely be reduced to a single model alias. A provider-wide grant also authorizes every public model route on that provider. A **model-route** grant authorizes only that alias through the unified API.
+For providers with a different native API, the gateway translates their stream into OpenAI chunks. Ollama NDJSON and AWS Bedrock EventStream/ConverseStream are supported.
 
-### 20.3 Provider credentials
+### 20.3 Provider convergence
+
+Supported provider modes are:
+
+- **OpenAI API compatible** for OpenAI, Microsoft Foundry v1 endpoints, Hugging Face Inference Providers, Open WebUI, vLLM, and other services exposing the OpenAI Chat Completions contract.
+- **Ollama** for installations using Ollama's native `/api/chat` API. Requests and responses are adapted to OpenAI Chat Completions at the gateway boundary.
+- **AWS Bedrock** using the Bedrock Converse and ConverseStream APIs with Bedrock API-key or SigV4 authentication. The result is exposed northbound as OpenAI Chat Completions. Bedrock deployments that expose an OpenAI-compatible endpoint can instead be registered as **OpenAI API compatible** when bearer API-key authentication is used.
+- **Generic HTTP** for native pass-through when no OpenAI inference adapter is required.
+
+For an OpenAI-compatible downstream provider, the request body is preserved rather than reduced to a gateway-specific subset. The gateway replaces the public `model` alias with the provider-native model identifier, applies the provider credential, forwards the request, and rewrites the returned model identity back to the public alias.
+
+A base URL that already ends in `/v1`, including paths such as `/openai/v1`, is handled without duplicating the version segment.
+
+### 20.4 Models and authorization
+
+A model route maps one public OpenAI model ID to one provider-native model ID. Examples include:
+
+```text
+public alias         provider        downstream model
+fast-coder           Foundry         gpt-5.6-mini-prod
+local-coder          Ollama          qwen3:14b
+research-large       Hugging Face    openai/gpt-oss-120b:fastest
+bedrock-reasoner     Bedrock         global.openai.gpt-5.6-sol
+```
+
+Role permissions are evaluated before model metadata or inference traffic is returned. A route grant permits that public model through `/v1`. A provider-wide grant permits every route on the provider and also permits the native provider proxy.
+
+Unauthorized or unknown model aliases use OpenAI-style `model_not_found` responses without disclosing whether a hidden route exists.
+
+### 20.5 OpenAI error contract
+
+The `/v1` endpoints return errors in the OpenAI envelope:
+
+```json
+{
+  "error": {
+    "message": "The model 'private-model' does not exist or you do not have access to it.",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "model_not_found"
+  }
+}
+```
+
+The `/v1` authentication policy is API-oriented. Missing or invalid gateway API keys return HTTP 401 rather than redirecting to the browser login flow.
+
+### 20.6 Provider credentials
 
 Static provider credentials are stored as environment references such as:
 
@@ -1248,12 +1313,38 @@ Static provider credentials are stored as environment references such as:
 env:FOUNDRY_API_KEY
 ```
 
-The secret value itself is not written to the proxy database. Configure the header and prefix required by the downstream service. For example, an API-key-based Foundry endpoint may use header `api-key` with an empty prefix, while an OpenAI-compatible service may use `Authorization` with prefix `Bearer `.
+The secret value itself is not written to the proxy database. OpenAI-style services normally use header `Authorization` with prefix `Bearer `. A Foundry deployment can also use its required API-key header where appropriate.
 
-Bedrock can use a bearer API key through the provider credential reference or the standard `AWS_BEARER_TOKEN_BEDROCK` environment variable. If no bearer token is configured, the gateway uses SigV4 with provider-specific `env:` references or the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_DEFAULT_REGION` environment variables. Instance-profile and workload-identity credential discovery are not performed automatically.
+Bedrock can use a bearer API key through the provider credential reference or the standard `AWS_BEARER_TOKEN_BEDROCK` environment variable. If no bearer token is configured for the native Bedrock adapter, the gateway uses SigV4 with provider-specific `env:` references or the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_DEFAULT_REGION` environment variables.
 
-### 20.4 Example provider setup
+### 20.7 Native provider proxy
 
-For local Ollama, register a provider with base endpoint `http://ollama:11434`, type **Ollama**, and no downstream credential. Create a route such as public name `local-coder` mapped to downstream model `qwen3:14b`.
+Applications that intentionally need a provider-specific API can still use:
 
-For an OpenAI-compatible hosted endpoint, register the provider base URL, set the credential reference and header required by the service, then map stable public aliases to the provider's deployment or model IDs. This lets client configuration remain unchanged when the underlying provider or deployment changes.
+```text
+/models/native/{provider-slug}/{provider-path}
+```
+
+The native proxy preserves the downstream method, path, query string, request body, response status, headers, and response streaming while stripping northbound credentials and forwarding only the configured downstream credential.
+
+### 20.8 Legacy normalized API
+
+The earlier gateway-specific endpoints remain available for compatibility:
+
+```text
+GET  /models/
+POST /models/chat
+POST /models/chat/stream
+```
+
+New integrations should use `/v1/models` and `/v1/chat/completions`. The `/v1` surface is the model convergence contract going forward.
+
+### 20.9 Example provider setup
+
+For Hugging Face Inference Providers, register an **OpenAI API compatible** provider with base endpoint `https://router.huggingface.co/v1`, an `Authorization` bearer credential, and a route whose downstream model is the Hugging Face model ID.
+
+For Microsoft Foundry v1, register an **OpenAI API compatible** provider with the Foundry `/openai/v1` base URL and the credential required by the deployment.
+
+For local Ollama, register an **Ollama** provider with base endpoint `http://ollama:11434` and no credential. OpenAI clients still connect only to the gateway `/v1` URL.
+
+For AWS Bedrock, use the **AWS Bedrock** provider type when the gateway should adapt Converse/ConverseStream or use SigV4. If the selected Bedrock model supports Bedrock's OpenAI-compatible Chat Completions endpoint and a Bedrock bearer API key is available, it may instead be registered as **OpenAI API compatible**.

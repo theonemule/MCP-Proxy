@@ -303,32 +303,95 @@ The `2026-07-28` protocol's discovery and per-request metadata are handled by th
 
 ## Model Router Architecture
 
-The model router is parallel to the MCP transport rather than embedded inside it. Its code lives under `src/McpProxy/Models` and reuses the existing authentication principal, role resolution, API-key authentication, and claim-role mapping infrastructure.
+The model gateway is parallel to the MCP transport and reuses the same authentication principal, role resolution, API-key roles, claim-role mappings, and administrative security boundary.
 
-The durable model entities are:
+The durable entities remain:
 
-- `ModelProvider`, which stores the provider kind, public slug, base endpoint, optional unified chat path, and environment-secret references.
-- `ModelRoute`, which maps one globally unique public model name to a provider-specific downstream model ID.
+- `ModelProvider`, which stores provider protocol, endpoint, and environment-backed credential references.
+- `ModelRoute`, which maps a public OpenAI model ID to one provider-native model identifier.
 - `ModelPermission`, which grants a role either provider-wide access or access to one model route.
 
-`PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls the normalized API. A provider-wide grant implies access to all routes owned by that provider, while a route grant never implies native provider access.
+`PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls OpenAI-compatible inference. Provider-wide access implies all routes on that provider; route access does not imply native provider access.
 
-`ModelRouterService` implements the normalized `ModelChatRequest` contract and dispatches to protocol adapters for OpenAI-compatible APIs, Ollama, and AWS Bedrock. The same contract supports buffered responses and normalized streaming. OpenAI-compatible SSE, Ollama NDJSON, and Bedrock `ConverseStream` EventStream frames are converted into `ModelChatStreamEvent` values. `GenericHttp` is intentionally native-only. This keeps the normalized surface small while allowing providers with unusual APIs to remain usable without gateway-specific translation code.
+### OpenAI v1 compatibility layer
 
-`NativeModelProxyService` forwards native requests after removing gateway credentials and hop-by-hop headers. It then applies only the configured downstream credential. The configured gateway API-key header is removed dynamically, not just the default `X-Api-Key`. Native responses are streamed back to the caller.
+`OpenAiCompatibilityEndpoints` exposes:
 
-Bedrock uses the Converse API. A bearer API key can come from the provider credential reference or `AWS_BEARER_TOKEN_BEDROCK`. Otherwise the dependency-free `AwsSigV4Signer` signs requests using credentials resolved from explicit `env:` references or standard AWS environment variables. No AWS SDK dependency is required.
+- `GET /v1/models`
+- `GET /v1/models/{model}`
+- `POST /v1/chat/completions`
 
-### Model router HTTP surface
+`OpenAiCompatibilityService` is the primary model inference service for new clients.
 
-Northbound model routes are:
+The northbound contract deliberately matches OpenAI rather than defining another gateway schema. Public route names are OpenAI model IDs. Model-list responses use `object: "list"` and `object: "model"`. Chat responses use `chat.completion` and streaming responses use `chat.completion.chunk` records followed by `data: [DONE]`.
 
-- `GET /models/` to list public aliases visible to the caller.
-- `POST /models/chat` for the normalized chat contract; `"stream": true` switches the response to SSE.
-- `POST /models/chat/stream` as an explicit always-streaming alias.
-- `/models/native/{providerScope}` and `/models/native/{providerScope}/{**path}` for native provider pass-through, including raw provider streaming.
+For `ModelProviderKind.OpenAiCompatible`, the service clones the incoming OpenAI request, changes only `model` to the private downstream model ID, forces the selected streaming mode, applies the provider credential, and forwards the remaining OpenAI fields unchanged. Responses are returned in the downstream OpenAI shape with `model` rewritten to the public alias.
 
-Administration routes are:
+The default chat path is `/v1/chat/completions`. When a provider base endpoint already ends in `/v1`, including `/openai/v1`, the resolver appends only `/chat/completions`.
+
+### Native provider adapters
+
+`ModelProviderKind.Ollama` translates OpenAI messages and common sampling controls to `/api/chat`. Ollama output is converted back into OpenAI message, tool-call, usage, finish-reason, and streaming chunk structures.
+
+`ModelProviderKind.AwsBedrock` translates OpenAI messages, developer/system instructions, function tools, tool results, tool choice, and common inference settings into Bedrock Converse. `ConverseStream` EventStream frames are decoded by `AwsEventStreamReader` and converted to OpenAI Chat Completion chunks. Bedrock tool-use events are mapped to OpenAI function tool calls.
+
+A Bedrock endpoint that already implements OpenAI Chat Completions can instead be registered as `OpenAiCompatible` when its authentication can be represented by the normal static credential configuration. The native Bedrock adapter remains useful for SigV4 and models exposed through Converse.
+
+`ModelProviderKind.GenericHttp` is native-proxy only.
+
+### OpenAI authentication compatibility
+
+OpenAI SDKs send API keys through:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+Gateway-generated API keys use the existing `mcp_<prefix>.<secret>` format and are now accepted in that bearer position as well as in the configured legacy API-key header.
+
+The `/v1` routes use the `OpenAiSmart` authentication policy scheme. It selects the gateway API-key handler for gateway bearer keys, JWT bearer validation for other bearer tokens, and the API-key scheme for unauthenticated challenges. This prevents browser-cookie redirects on the API surface.
+
+`ApiKeyAuthenticationHandler` returns an OpenAI-shaped HTTP 401 envelope for `/v1` challenges.
+
+### OpenAI errors
+
+Validation, authorization, and routing errors use the standard OpenAI envelope:
+
+```json
+{
+  "error": {
+    "message": "...",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "model_not_found"
+  }
+}
+```
+
+Downstream implementation details are logged server-side and returned northbound as a generic `api_error`/`upstream_error` rather than reflecting provider error bodies across the gateway security boundary.
+
+### Legacy normalized surface
+
+`ModelRouterService` and the older endpoints remain available for compatibility:
+
+- `GET /models/`
+- `POST /models/chat`
+- `POST /models/chat/stream`
+
+They should not be used as the contract for new integrations. `/v1` is the convergence surface.
+
+### Native provider proxy
+
+`NativeModelProxyService` remains available under:
+
+- `/models/native/{providerScope}`
+- `/models/native/{providerScope}/{**path}`
+
+It removes gateway authorization, cookies, forwarding headers, and hop-by-hop headers, adds only the configured downstream credential, and streams the provider response without normalization.
+
+### Administration routes
+
+Administration remains provider/route based:
 
 - `GET/POST /admin/model-providers`
 - `PUT/DELETE /admin/model-providers/{id}`
@@ -339,35 +402,17 @@ Administration routes are:
 
 Provider and route administration use `AdminScope.ServerAdmin`. Model permission administration uses `AdminScope.UserAdmin`.
 
-The normalized request is deliberately provider-neutral:
-
-```json
-{
-  "model": "fast-coder",
-  "systemPrompt": "Keep the answer concise.",
-  "prompt": "Explain this function.",
-  "stream": true,
-  "parameters": {
-    "temperature": 0.2,
-    "max_tokens": 800
-  }
-}
-```
-
-OpenAI-compatible parameters pass through except fields owned by the gateway. Ollama parameters are translated into its native request shape. Bedrock inference fields are mapped to `inferenceConfig`, with other model-specific fields placed under `additionalModelRequestFields`.
-
-The normalized SSE event contract uses `start`, `delta`, `usage`, `done`, and `error` event names. `AwsEventStreamReader` validates AWS EventStream prelude and message CRCs before decoding Bedrock streaming payloads.
-
 ### Model schema compatibility
 
-The project historically uses `EnsureCreated` rather than EF migrations. Fresh databases receive the model tables from the EF model. `ModelSchemaUpgrade.EnsureAsync` creates only the new model-router tables and indexes for existing SQLite, PostgreSQL, and SQL Server databases. This preserves existing users, roles, API keys, MCP registrations, and permissions when upgrading.
+The project historically uses `EnsureCreated` rather than EF migrations. Fresh databases receive the model tables from the EF model. `ModelSchemaUpgrade.EnsureAsync` creates only the model-router tables and indexes for existing SQLite, PostgreSQL, and SQL Server databases. Existing users, roles, API keys, MCP registrations, and permissions are preserved.
 
-### Model router security rules
+### Security rules
 
-- Provider secrets are environment references. Plaintext downstream credentials are never returned by the admin API or persisted in model-provider rows.
-- Northbound `Authorization`, the configured API-key header, cookies, forwarding headers, proxy-auth headers, and hop-by-hop headers are never forwarded to a downstream model provider.
-- Route grants are the least-privilege default for the normalized API. Provider grants should be reserved for clients that need the provider's native API or every model hosted by that provider.
-- Unauthorized models and providers return not-found behavior rather than disclosing registered resources.
-- Unified downstream failures are logged server-side and returned to callers as generic gateway failures so provider response details are not reflected across the security boundary.
+- Provider secrets are environment references. Plaintext downstream credentials are not returned by admin APIs or stored as model-provider secret values.
+- Northbound `Authorization`, configured gateway API-key headers, cookies, forwarding headers, proxy-auth headers, and hop-by-hop headers are never forwarded as client credentials to a provider.
+- OpenAI-compatible direct routing applies the configured downstream provider credential after northbound credentials have been isolated.
+- Route grants are the least-privilege default.
+- Unknown and unauthorized model IDs use indistinguishable `model_not_found` behavior.
+- Provider error bodies are not reflected to the caller.
 
-The model-router tests cover provider-versus-route authorization, OpenAI-compatible request translation and downstream credential replacement, normalized OpenAI/Ollama/Bedrock streaming, deterministic Bedrock SigV4 signing, and schema upgrade of an existing SQLite database. A container smoke test also verifies both `2026-07-28` `server/discover` and `2025-11-25` `initialize` against the same stateless MCP endpoint.
+The test suite covers model authorization, OpenAI model-list shape, direct OpenAI-compatible request preservation, `/v1` model alias rewriting, OpenAI-format streaming chunks, OpenAI bearer API-key parsing, Ollama-to-OpenAI adaptation, Bedrock streaming adaptation, SigV4 signing, and database schema upgrades.

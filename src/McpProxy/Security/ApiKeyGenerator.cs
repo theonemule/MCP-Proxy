@@ -37,6 +37,27 @@ public static class ApiKeyGenerator
         return false;
     }
 
+    /// <summary>Extracts a gateway API key from the HTTP Bearer form used by OpenAI clients.</summary>
+    public static bool TryGetBearerApiKey(string? authorization, out string apiKey)
+    {
+        apiKey = "";
+        if (string.IsNullOrWhiteSpace(authorization) ||
+            !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var candidate = authorization["Bearer ".Length..].Trim();
+        if (!candidate.StartsWith("mcp_", StringComparison.Ordinal) ||
+            !TrySplit(candidate, out _, out _))
+        {
+            return false;
+        }
+
+        apiKey = candidate;
+        return true;
+    }
+
     /// <summary>Compares a presented secret with a stored hash using constant-time comparison.</summary>
     public static bool Verify(string presentedSecret, string secretHash) =>
         CryptographicOperations.FixedTimeEquals(
