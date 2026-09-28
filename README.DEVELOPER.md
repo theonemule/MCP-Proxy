@@ -293,6 +293,14 @@ Use a separate integration environment for PostgreSQL, SQL Server, Redis, OIDC, 
 
 Keep public types and methods XML-documented. The build generates documentation files and reports missing public documentation warnings during development.
 
+## MCP 2.x and 2026-07-28 Protocol Support
+
+The proxy references `ModelContextProtocol.AspNetCore` 2.2.0. The northbound transport explicitly uses `HttpServerSessionMode.Stateless`, which serves the `2026-07-28` stateless protocol directly while retaining initialize-era compatibility on the same HTTP endpoints. A modern request is self-contained and does not use `Mcp-Session-Id`; older clients may still negotiate an initialize-capable protocol revision.
+
+`DownstreamClientFactory` uses the SDK 2.x `HttpClientTransport` in Streamable HTTP mode without pinning `McpClientOptions.ProtocolVersion`. This allows the SDK to negotiate the current protocol with a modern downstream server and fall back when the downstream peer only implements an older revision.
+
+The `2026-07-28` protocol's discovery and per-request metadata are handled by the SDK. Gateway authorization remains request-scoped and continues to filter tools, resources, and prompts independently of the negotiated protocol revision.
+
 ## Model Router Architecture
 
 The model router is parallel to the MCP transport rather than embedded inside it. Its code lives under `src/McpProxy/Models` and reuses the existing authentication principal, role resolution, API-key authentication, and claim-role mapping infrastructure.
@@ -305,7 +313,7 @@ The durable model entities are:
 
 `PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls the normalized API. A provider-wide grant implies access to all routes owned by that provider, while a route grant never implies native provider access.
 
-`ModelRouterService` implements the normalized `ModelChatRequest` contract and dispatches to protocol adapters for OpenAI-compatible APIs, Ollama, and AWS Bedrock. `GenericHttp` is intentionally native-only. This keeps the normalized surface small while allowing providers with unusual APIs to remain usable without gateway-specific translation code.
+`ModelRouterService` implements the normalized `ModelChatRequest` contract and dispatches to protocol adapters for OpenAI-compatible APIs, Ollama, and AWS Bedrock. The same contract supports buffered responses and normalized streaming. OpenAI-compatible SSE, Ollama NDJSON, and Bedrock `ConverseStream` EventStream frames are converted into `ModelChatStreamEvent` values. `GenericHttp` is intentionally native-only. This keeps the normalized surface small while allowing providers with unusual APIs to remain usable without gateway-specific translation code.
 
 `NativeModelProxyService` forwards native requests after removing gateway credentials and hop-by-hop headers. It then applies only the configured downstream credential. The configured gateway API-key header is removed dynamically, not just the default `X-Api-Key`. Native responses are streamed back to the caller.
 
@@ -316,8 +324,9 @@ Bedrock uses the Converse API. A bearer API key can come from the provider crede
 Northbound model routes are:
 
 - `GET /models/` to list public aliases visible to the caller.
-- `POST /models/chat` for the normalized chat contract.
-- `/models/native/{providerScope}` and `/models/native/{providerScope}/{**path}` for native provider pass-through.
+- `POST /models/chat` for the normalized chat contract; `"stream": true` switches the response to SSE.
+- `POST /models/chat/stream` as an explicit always-streaming alias.
+- `/models/native/{providerScope}` and `/models/native/{providerScope}/{**path}` for native provider pass-through, including raw provider streaming.
 
 Administration routes are:
 
@@ -337,6 +346,7 @@ The normalized request is deliberately provider-neutral:
   "model": "fast-coder",
   "systemPrompt": "Keep the answer concise.",
   "prompt": "Explain this function.",
+  "stream": true,
   "parameters": {
     "temperature": 0.2,
     "max_tokens": 800
@@ -345,6 +355,8 @@ The normalized request is deliberately provider-neutral:
 ```
 
 OpenAI-compatible parameters pass through except fields owned by the gateway. Ollama parameters are translated into its native request shape. Bedrock inference fields are mapped to `inferenceConfig`, with other model-specific fields placed under `additionalModelRequestFields`.
+
+The normalized SSE event contract uses `start`, `delta`, `usage`, `done`, and `error` event names. `AwsEventStreamReader` validates AWS EventStream prelude and message CRCs before decoding Bedrock streaming payloads.
 
 ### Model schema compatibility
 
@@ -358,4 +370,4 @@ The project historically uses `EnsureCreated` rather than EF migrations. Fresh d
 - Unauthorized models and providers return not-found behavior rather than disclosing registered resources.
 - Unified downstream failures are logged server-side and returned to callers as generic gateway failures so provider response details are not reflected across the security boundary.
 
-The model-router tests cover provider-versus-route authorization, OpenAI-compatible request translation and downstream credential replacement, deterministic Bedrock SigV4 signing, and schema upgrade of an existing SQLite database.
+The model-router tests cover provider-versus-route authorization, OpenAI-compatible request translation and downstream credential replacement, normalized OpenAI/Ollama/Bedrock streaming, deterministic Bedrock SigV4 signing, and schema upgrade of an existing SQLite database. A container smoke test also verifies both `2026-07-28` `server/discover` and `2025-11-25` `initialize` against the same stateless MCP endpoint.

@@ -32,7 +32,7 @@ public sealed class DownstreamClientFactory(IHttpClientFactory httpClientFactory
 
         return await McpClient.CreateAsync(
             transport,
-            new McpClientOptions { ClientInfo = new Implementation { Name = "mcp-proxy", Version = "2.0.0" } },
+            new McpClientOptions { ClientInfo = new Implementation { Name = "mcp-proxy", Version = "2.2.0" } },
             loggerFactory,
             cancellationToken);
     }

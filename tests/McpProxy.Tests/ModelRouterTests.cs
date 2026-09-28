@@ -312,3 +312,272 @@ public sealed class ModelSchemaUpgradeTests
         }
     }
 }
+
+public sealed class ModelStreamingTests
+{
+    [Fact]
+    public async Task OpenAi_stream_is_normalized_to_start_delta_usage_done_events()
+    {
+        var handler = new ProviderStreamingHandler();
+        var (router, principal) = await CreateRouterAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://models.example",
+            "openai-model",
+            handler);
+
+        var events = await CollectAsync(router.StreamChatAsync(
+            principal,
+            new ModelChatRequest("public-model", "hello", null, null, Stream: true),
+            default));
+
+        Assert.Equal(["start", "delta", "delta", "usage", "done"], events.Select(x => x.Event).ToArray());
+        Assert.Equal("Hello", events[1].Text);
+        Assert.Equal(" world", events[2].Text);
+        Assert.Equal("stop", events[^1].FinishReason);
+        Assert.Equal(3, events[^1].Usage?["total_tokens"]?.GetValue<int>());
+
+        var sent = JsonDocument.Parse(handler.LastBody!);
+        Assert.True(sent.RootElement.GetProperty("stream").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Ollama_stream_is_normalized_to_start_delta_usage_done_events()
+    {
+        var handler = new ProviderStreamingHandler();
+        var (router, principal) = await CreateRouterAsync(
+            ModelProviderKind.Ollama,
+            "https://ollama.example",
+            "qwen3:14b",
+            handler);
+
+        var events = await CollectAsync(router.StreamChatAsync(
+            principal,
+            new ModelChatRequest("public-model", "hello", null, null, Stream: true),
+            default));
+
+        Assert.Equal(["start", "delta", "delta", "usage", "done"], events.Select(x => x.Event).ToArray());
+        Assert.Equal("Hi", events[1].Text);
+        Assert.Equal(" there", events[2].Text);
+        Assert.Equal("stop", events[^1].FinishReason);
+        Assert.Equal(4, events[^1].Usage?["promptTokens"]?.GetValue<int>());
+        Assert.Equal(2, events[^1].Usage?["completionTokens"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Bedrock_converse_stream_eventstream_is_normalized()
+    {
+        Environment.SetEnvironmentVariable("BEDROCK_STREAM_TEST_KEY", "bedrock-bearer");
+        try
+        {
+            var handler = new ProviderStreamingHandler();
+            var (router, principal) = await CreateRouterAsync(
+                ModelProviderKind.AwsBedrock,
+                "https://bedrock.example",
+                "amazon.nova-test",
+                handler,
+                credentialReference: "env:BEDROCK_STREAM_TEST_KEY");
+
+            var events = await CollectAsync(router.StreamChatAsync(
+                principal,
+                new ModelChatRequest("public-model", "hello", null, null, Stream: true),
+                default));
+
+            Assert.Equal(["start", "delta", "delta", "usage", "done"], events.Select(x => x.Event).ToArray());
+            Assert.Equal("Bed", events[1].Text);
+            Assert.Equal("rock", events[2].Text);
+            Assert.Equal("end_turn", events[^1].FinishReason);
+            Assert.Equal(7, events[^1].Usage?["totalTokens"]?.GetValue<int>());
+            Assert.Equal("Bearer bedrock-bearer", handler.LastRequest?.Headers.Authorization?.ToString());
+            Assert.EndsWith("/model/amazon.nova-test/converse-stream", handler.LastRequest?.RequestUri?.AbsolutePath);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BEDROCK_STREAM_TEST_KEY", null);
+        }
+    }
+
+    private static async Task<(ModelRouterService Router, ClaimsPrincipal Principal)> CreateRouterAsync(
+        ModelProviderKind kind,
+        string endpoint,
+        string downstreamModel,
+        HttpMessageHandler handler,
+        string? credentialReference = null)
+    {
+        var options = new DbContextOptionsBuilder<ProxyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        var db = new ProxyDbContext(options);
+
+        var provider = new ModelProvider
+        {
+            Name = "Provider",
+            Slug = "provider",
+            Kind = kind,
+            BaseEndpoint = endpoint,
+            CredentialReference = credentialReference,
+            CredentialHeader = "Authorization",
+            CredentialPrefix = "Bearer "
+        };
+        var route = new ModelRoute
+        {
+            ProviderId = provider.Id,
+            Provider = provider,
+            PublicName = "public-model",
+            DownstreamModel = downstreamModel
+        };
+        var role = new Role { Name = "AI Users" };
+        var user = new User { Username = "stream-user", PasswordHash = "x" };
+        db.AddRange(provider, route, role, user);
+        db.Add(new UserRole { UserId = user.Id, RoleId = role.Id });
+        db.Add(new ModelPermission
+        {
+            RoleId = role.Id,
+            Scope = ModelPermissionScope.Route,
+            ModelRouteId = route.Id
+        });
+        await db.SaveChangesAsync();
+
+        var principal = new ClaimsPrincipal(new ClaimsIdentity([
+            new Claim(ProxyClaimTypes.PrincipalKind, "user"),
+            new Claim(ProxyClaimTypes.PrincipalId, user.Id.ToString())
+        ], "Test"));
+
+        return (
+            new ModelRouterService(
+                db,
+                new PermissionService(db),
+                new StreamingHttpClientFactory(new HttpClient(handler))),
+            principal);
+    }
+
+    private static async Task<List<ModelChatStreamEvent>> CollectAsync(
+        IAsyncEnumerable<ModelChatStreamEvent> source)
+    {
+        var result = new List<ModelChatStreamEvent>();
+        await foreach (var item in source)
+        {
+            result.Add(item);
+        }
+        return result;
+    }
+
+    private sealed class StreamingHttpClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
+    }
+
+    private sealed class ProviderStreamingHandler : HttpMessageHandler
+    {
+        public HttpRequestMessage? LastRequest { get; private set; }
+        public string? LastBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            LastBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            if (request.RequestUri!.AbsolutePath.EndsWith("/v1/chat/completions", StringComparison.Ordinal))
+            {
+                const string sse =
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n" +
+                    "data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\n" +
+                    "data: {\"choices\":[],\"usage\":{\"total_tokens\":3}}\n\n" +
+                    "data: [DONE]\n\n";
+                return StreamingResponse("text/event-stream", Encoding.UTF8.GetBytes(sse));
+            }
+
+            if (request.RequestUri.AbsolutePath.EndsWith("/api/chat", StringComparison.Ordinal))
+            {
+                const string ndjson =
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}\n" +
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\" there\"},\"done\":false}\n" +
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":4,\"eval_count\":2}\n";
+                return StreamingResponse("application/x-ndjson", Encoding.UTF8.GetBytes(ndjson));
+            }
+
+            if (request.RequestUri.AbsolutePath.EndsWith("/converse-stream", StringComparison.Ordinal))
+            {
+                var bytes = BuildAwsEventStream(
+                    ("contentBlockDelta", """{"delta":{"text":"Bed"},"contentBlockIndex":0}"""),
+                    ("contentBlockDelta", """{"delta":{"text":"rock"},"contentBlockIndex":0}"""),
+                    ("messageStop", """{"stopReason":"end_turn"}"""),
+                    ("metadata", """{"usage":{"inputTokens":5,"outputTokens":2,"totalTokens":7},"metrics":{"latencyMs":1}}"""));
+                return StreamingResponse("application/vnd.amazon.eventstream", bytes);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        private static HttpResponseMessage StreamingResponse(string mediaType, byte[] body) =>
+            new(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(body)
+                {
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType) }
+                }
+            };
+
+        private static byte[] BuildAwsEventStream(params (string EventType, string Payload)[] events)
+        {
+            using var output = new MemoryStream();
+            var crcBytes = new byte[4];
+            foreach (var item in events)
+            {
+                var headers = BuildStringHeader(":event-type", item.EventType);
+                var payload = Encoding.UTF8.GetBytes(item.Payload);
+                var totalLength = 12 + headers.Length + payload.Length + 4;
+
+                var prelude = new byte[12];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(prelude.AsSpan(0, 4), (uint)totalLength);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(prelude.AsSpan(4, 4), (uint)headers.Length);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(prelude.AsSpan(8, 4), Crc32(prelude.AsSpan(0, 8)));
+
+                var frameStart = output.Position;
+                output.Write(prelude);
+                output.Write(headers);
+                output.Write(payload);
+
+                var frameWithoutCrc = output.GetBuffer().AsSpan(
+                    checked((int)frameStart),
+                    prelude.Length + headers.Length + payload.Length);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(crcBytes, Crc32(frameWithoutCrc));
+                output.Write(crcBytes);
+            }
+
+            return output.ToArray();
+        }
+
+        private static byte[] BuildStringHeader(string name, string value)
+        {
+            var nameBytes = Encoding.UTF8.GetBytes(name);
+            var valueBytes = Encoding.UTF8.GetBytes(value);
+            using var output = new MemoryStream();
+            output.WriteByte((byte)nameBytes.Length);
+            output.Write(nameBytes);
+            output.WriteByte(7);
+            Span<byte> length = stackalloc byte[2];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(length, checked((ushort)valueBytes.Length));
+            output.Write(length);
+            output.Write(valueBytes);
+            return output.ToArray();
+        }
+
+        private static uint Crc32(ReadOnlySpan<byte> bytes)
+        {
+            uint crc = 0xFFFFFFFF;
+            foreach (var value in bytes)
+            {
+                crc ^= value;
+                for (var i = 0; i < 8; i++)
+                {
+                    crc = (crc >> 1) ^ (0xEDB88320u & (uint)-(int)(crc & 1));
+                }
+            }
+            return ~crc;
+        }
+    }
+}
