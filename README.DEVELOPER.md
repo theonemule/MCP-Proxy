@@ -320,6 +320,7 @@ The durable entities remain:
 - `GET /v1/models`
 - `GET /v1/models/{model}`
 - `POST /v1/chat/completions`
+- `POST /v1/{**operation}` for JSON OpenAI model operations such as Responses and Embeddings
 
 `OpenAiCompatibilityService` is the primary model inference service for new clients.
 
@@ -327,7 +328,7 @@ The northbound contract deliberately matches OpenAI rather than defining another
 
 For `ModelProviderKind.OpenAiCompatible`, the service clones the incoming OpenAI request, changes only `model` to the private downstream model ID, forces the selected streaming mode, applies the provider credential, and forwards the remaining OpenAI fields unchanged. Responses are returned in the downstream OpenAI shape with `model` rewritten to the public alias.
 
-The default chat path is `/v1/chat/completions`. When a provider base endpoint already ends in `/v1`, including `/openai/v1`, the resolver appends only `/chat/completions`.
+The default chat path is `/v1/chat/completions`. When a provider base endpoint already ends in `/v1`, including `/openai/v1`, the resolver appends only the requested operation path. The catch-all POST route requires a `model` field, resolves permissions, substitutes the downstream model ID, and forwards the remaining JSON unchanged. For `AwsBedrock`, generic OpenAI operations use `/openai/v1/{operation}` and retain bearer-token or SigV4 authentication.
 
 ### Native provider adapters
 
@@ -415,4 +416,4 @@ The project historically uses `EnsureCreated` rather than EF migrations. Fresh d
 - Unknown and unauthorized model IDs use indistinguishable `model_not_found` behavior.
 - Provider error bodies are not reflected to the caller.
 
-The test suite covers model authorization, OpenAI model-list shape, direct OpenAI-compatible request preservation, `/v1` model alias rewriting, OpenAI-format streaming chunks, OpenAI bearer API-key parsing, Ollama-to-OpenAI adaptation, Bedrock streaming adaptation, SigV4 signing, and database schema upgrades.
+The test suite covers model authorization, OpenAI model-list shape, direct OpenAI-compatible request preservation, generic `/v1` operation forwarding, Responses-style SSE event preservation, recursive model-alias rewriting, OpenAI bearer API-key parsing, Ollama-to-OpenAI adaptation, Bedrock OpenAI-runtime routing, Bedrock streaming adaptation, SigV4 signing, and database schema upgrades.
