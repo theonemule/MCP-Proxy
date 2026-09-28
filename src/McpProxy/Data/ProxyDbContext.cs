@@ -17,6 +17,12 @@ public sealed class ProxyDbContext(DbContextOptions<ProxyDbContext> options) : D
     public DbSet<ClaimRoleMapping> ClaimRoleMappings => Set<ClaimRoleMapping>();
     /// <summary>Registered downstream MCP servers.</summary>
     public DbSet<McpServer> Servers => Set<McpServer>();
+    /// <summary>Registered downstream model providers.</summary>
+    public DbSet<ModelProvider> ModelProviders => Set<ModelProvider>();
+    /// <summary>Public model aliases.</summary>
+    public DbSet<ModelRoute> ModelRoutes => Set<ModelRoute>();
+    /// <summary>Role grants for model providers and routes.</summary>
+    public DbSet<ModelPermission> ModelPermissions => Set<ModelPermission>();
 
     /// <summary>Configures indexes, relationships, composite keys, and cascade behavior.</summary>
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -68,6 +74,29 @@ public sealed class ProxyDbContext(DbContextOptions<ProxyDbContext> options) : D
         modelBuilder.Entity<McpServer>(server =>
         {
             server.HasIndex(x => x.NamespacePrefix).IsUnique();
+        });
+
+        modelBuilder.Entity<ModelProvider>(provider =>
+        {
+            provider.HasIndex(x => x.Slug).IsUnique();
+        });
+
+        modelBuilder.Entity<ModelRoute>(route =>
+        {
+            route.HasIndex(x => x.PublicName).IsUnique();
+            route.HasOne(x => x.Provider).WithMany(x => x.Routes)
+                .HasForeignKey(x => x.ProviderId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ModelPermission>(permission =>
+        {
+            permission.HasOne(x => x.Role).WithMany(x => x.ModelPermissions)
+                .HasForeignKey(x => x.RoleId).OnDelete(DeleteBehavior.Cascade);
+            permission.HasOne(x => x.Provider).WithMany(x => x.Permissions)
+                .HasForeignKey(x => x.ProviderId).OnDelete(DeleteBehavior.Restrict);
+            permission.HasOne(x => x.ModelRoute).WithMany(x => x.Permissions)
+                .HasForeignKey(x => x.ModelRouteId).OnDelete(DeleteBehavior.Cascade);
+            permission.HasIndex(x => new { x.RoleId, x.Scope, x.ProviderId, x.ModelRouteId });
         });
     }
 }

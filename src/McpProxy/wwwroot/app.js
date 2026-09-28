@@ -5,6 +5,9 @@ const state = {
   username: sessionStorage.getItem("mcpproxy_username") || null,
   roles: [],
   servers: [],
+  modelProviders: [],
+  modelRoutes: [],
+  modelPermissions: [],
   users: [],
   apiKeys: [],
   mappings: [],
@@ -95,9 +98,12 @@ function emptyState(icon, message) {
 // ---- data loading ----
 
 async function loadAll() {
-  const [roles, servers, users, apiKeys, mappings, permissions] = await Promise.all([
+  const [roles, servers, modelProviders, modelRoutes, modelPermissions, users, apiKeys, mappings, permissions] = await Promise.all([
     api("GET", "/admin/roles"),
     api("GET", "/admin/servers"),
+    api("GET", "/admin/model-providers"),
+    api("GET", "/admin/model-routes"),
+    api("GET", "/admin/model-permissions"),
     api("GET", "/admin/users"),
     api("GET", "/admin/apikeys"),
     api("GET", "/admin/claim-mappings"),
@@ -105,6 +111,9 @@ async function loadAll() {
   ]);
   state.roles = roles;
   state.servers = servers;
+  state.modelProviders = modelProviders;
+  state.modelRoutes = modelRoutes;
+  state.modelPermissions = modelPermissions;
   state.users = users;
   state.apiKeys = apiKeys;
   state.mappings = mappings;
@@ -124,6 +133,7 @@ async function fetchCatalog(serverId) {
 
 function renderAll() {
   renderServers();
+  renderModels();
   renderUsers();
   renderRoles();
   renderApiKeys();
@@ -266,6 +276,198 @@ function addServerModalHtml(server) {
       </div>
     </form>`;
 }
+
+
+// ---- Models ----
+
+const MODEL_PROVIDER_KIND = {
+  0: "OpenAI compatible",
+  1: "Ollama",
+  2: "AWS Bedrock",
+  3: "Generic HTTP"
+};
+
+function renderModels() {
+  const providerRows = state.modelProviders.map((p) => `
+    <tr>
+      <td class="fw-semibold">${escapeHtml(p.name)}</td>
+      <td><code>${escapeHtml(p.slug)}</code></td>
+      <td>${escapeHtml(MODEL_PROVIDER_KIND[p.kind] || p.kind)}</td>
+      <td class="text-break small">${p.baseEndpoint ? `<code>${escapeHtml(p.baseEndpoint)}</code>` : '<span class="text-muted">regional default</span>'}</td>
+      <td><code>${escapeHtml(location.origin)}/models/native/${escapeHtml(p.slug)}/...</code></td>
+      <td>${p.enabled ? '<span class="badge text-bg-success">Enabled</span>' : '<span class="badge text-bg-secondary">Disabled</span>'}</td>
+      <td class="text-nowrap">
+        <button class="btn btn-sm btn-outline-secondary ab" data-action="open-edit-model-provider" data-id="${p.id}" title="Edit"><i class="bi bi-pencil"></i></button>
+        <button class="btn btn-sm btn-outline-danger ab" data-action="delete-model-provider" data-id="${p.id}" title="Delete"><i class="bi bi-trash"></i></button>
+      </td>
+    </tr>`).join("");
+
+  const routeRows = state.modelRoutes.map((r) => `
+    <tr>
+      <td class="fw-semibold"><code>${escapeHtml(r.publicName)}</code></td>
+      <td>${escapeHtml(r.providerName)}</td>
+      <td><code>${escapeHtml(r.downstreamModel)}</code></td>
+      <td>${r.enabled ? '<span class="badge text-bg-success">Enabled</span>' : '<span class="badge text-bg-secondary">Disabled</span>'}</td>
+      <td class="text-nowrap">
+        <button class="btn btn-sm btn-outline-secondary ab" data-action="open-edit-model-route" data-id="${r.id}" title="Edit"><i class="bi bi-pencil"></i></button>
+        <button class="btn btn-sm btn-outline-danger ab" data-action="delete-model-route" data-id="${r.id}" title="Delete"><i class="bi bi-trash"></i></button>
+      </td>
+    </tr>`).join("");
+
+  const grantRows = state.modelPermissions.map((g) => `
+    <tr>
+      <td>${escapeHtml(g.roleName)}</td>
+      <td>${g.scope === 0 ? '<span class="badge text-bg-primary">Provider</span>' : '<span class="badge text-bg-info">Model</span>'}</td>
+      <td>${escapeHtml(g.scope === 0 ? g.providerName : g.modelName)}</td>
+      <td><button class="btn btn-sm btn-outline-danger ab" data-action="delete-model-permission" data-id="${g.id}" title="Revoke"><i class="bi bi-trash"></i></button></td>
+    </tr>`).join("");
+
+  el("tab-models").innerHTML =
+    pageHeader("bi-cpu", "Model Router",
+      '<div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" data-action="open-add-model-route"><i class="bi bi-signpost me-1"></i>Add Model Route</button><button class="btn btn-sm btn-primary" data-action="open-add-model-provider"><i class="bi bi-plus-lg me-1"></i>Add Provider</button></div>') +
+    `<p class="text-muted small">Unified API: <code>POST ${escapeHtml(location.origin)}/models/chat</code>. Native provider APIs are exposed under <code>/models/native/{provider}/...</code> with the provider-specific path, method, query string, and response preserved.</p>
+    <h6 class="mt-3">Providers</h6>` +
+    (state.modelProviders.length ? `
+      <table class="table table-sm align-middle bg-white">
+        <thead><tr><th>Name</th><th>Slug</th><th>Type</th><th>Base endpoint</th><th>Native proxy</th><th>Status</th><th></th></tr></thead>
+        <tbody>${providerRows}</tbody>
+      </table>` : emptyState("bi-cpu", "No model providers registered yet.")) +
+    `<h6 class="mt-4">Public model routes</h6>` +
+    (state.modelRoutes.length ? `
+      <table class="table table-sm align-middle bg-white">
+        <thead><tr><th>Public model</th><th>Provider</th><th>Downstream model</th><th>Status</th><th></th></tr></thead>
+        <tbody>${routeRows}</tbody>
+      </table>` : emptyState("bi-signpost", "No model routes registered yet.")) +
+    `<div class="d-flex align-items-center justify-content-between mt-4 mb-2">
+       <h6 class="mb-0">Model access grants</h6>
+       <button class="btn btn-sm btn-outline-primary" data-action="open-add-model-permission"><i class="bi bi-shield-plus me-1"></i>Add Grant</button>
+     </div>
+     <p class="text-muted small">Provider grants allow native proxy access and every model route on that provider. Model grants allow only the selected alias through the unified API.</p>` +
+    (state.modelPermissions.length ? `
+      <table class="table table-sm align-middle bg-white">
+        <thead><tr><th>Role</th><th>Scope</th><th>Target</th><th></th></tr></thead>
+        <tbody>${grantRows}</tbody>
+      </table>` : emptyState("bi-shield-check", "No model access grants yet."));
+}
+
+function modelProviderModalHtml(provider) {
+  const kindOptions = Object.entries(MODEL_PROVIDER_KIND).map(([value, label]) =>
+    `<option value="${value}" ${Number(value) === provider?.kind ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+
+  return `
+    <form id="model-provider-form">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="form-label">Name <span class="text-danger">*</span></label>
+          <input class="form-control" name="name" value="${escapeHtml(provider?.name || "")}" required></div>
+        <div class="col-md-3"><label class="form-label">Slug <span class="text-danger">*</span></label>
+          <input class="form-control" name="slug" value="${escapeHtml(provider?.slug || "")}" placeholder="foundry-prod" required></div>
+        <div class="col-md-3"><label class="form-label">Type</label>
+          <select class="form-select" name="kind">${kindOptions}</select></div>
+
+        <div class="col-md-8"><label class="form-label">Base endpoint</label>
+          <input class="form-control" name="baseEndpoint" value="${escapeHtml(provider?.baseEndpoint || "")}" placeholder="https://host.example"></div>
+        <div class="col-md-4"><label class="form-label">Unified chat path</label>
+          <input class="form-control" name="chatPath" value="${escapeHtml(provider?.chatPath || "")}" placeholder="/v1/chat/completions"></div>
+
+        <div class="col-12"><hr class="my-1"><div class="text-muted small">Static HTTP credential. For Bedrock this can be a bearer API key; leave it blank to use SigV4</div></div>
+        <div class="col-md-4"><label class="form-label">Secret reference</label>
+          <input class="form-control" name="credentialReference" value="${escapeHtml(provider?.credentialReference || "")}" placeholder="env:MODEL_API_KEY"></div>
+        <div class="col-md-4"><label class="form-label">Header</label>
+          <input class="form-control" name="credentialHeader" value="${escapeHtml(provider?.credentialHeader || "Authorization")}"></div>
+        <div class="col-md-4"><label class="form-label">Prefix</label>
+          <input class="form-control" name="credentialPrefix" value="${escapeHtml(provider?.credentialPrefix ?? "Bearer ")}" placeholder="Bearer "></div>
+
+        <div class="col-12"><hr class="my-1"><div class="text-muted small">AWS Bedrock. Explicit environment references are optional when standard AWS environment variables are set.</div></div>
+        <div class="col-md-3"><label class="form-label">Region</label>
+          <input class="form-control" name="awsRegion" value="${escapeHtml(provider?.awsRegion || "")}" placeholder="us-east-1"></div>
+        <div class="col-md-3"><label class="form-label">Access key ref</label>
+          <input class="form-control" name="awsAccessKeyReference" value="${escapeHtml(provider?.awsAccessKeyReference || "")}" placeholder="env:AWS_ACCESS_KEY_ID"></div>
+        <div class="col-md-3"><label class="form-label">Secret key ref</label>
+          <input class="form-control" name="awsSecretKeyReference" value="${escapeHtml(provider?.awsSecretKeyReference || "")}" placeholder="env:AWS_SECRET_ACCESS_KEY"></div>
+        <div class="col-md-3"><label class="form-label">Session token ref</label>
+          <input class="form-control" name="awsSessionTokenReference" value="${escapeHtml(provider?.awsSessionTokenReference || "")}" placeholder="env:AWS_SESSION_TOKEN"></div>
+
+        <div class="col-12"><div class="form-check">
+          <input class="form-check-input" type="checkbox" name="enabled" id="model-provider-enabled" ${provider?.enabled !== false ? "checked" : ""}>
+          <label class="form-check-label" for="model-provider-enabled">Enabled</label>
+        </div></div>
+      </div>
+      <div class="mt-4 text-end">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-primary">${provider ? "Save" : "Add Provider"}</button>
+      </div>
+    </form>`;
+}
+
+function modelRouteModalHtml(route) {
+  const providers = state.modelProviders.map((p) =>
+    `<option value="${p.id}" ${route?.providerId === p.id ? "selected" : ""}>${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join("");
+  return `
+    <form id="model-route-form">
+      <div class="row g-3">
+        <div class="col-md-5"><label class="form-label">Provider <span class="text-danger">*</span></label>
+          <select class="form-select" name="providerId" required><option value="">Choose...</option>${providers}</select></div>
+        <div class="col-md-3"><label class="form-label">Public model name <span class="text-danger">*</span></label>
+          <input class="form-control" name="publicName" value="${escapeHtml(route?.publicName || "")}" placeholder="fast-coder" required></div>
+        <div class="col-md-4"><label class="form-label">Downstream model ID <span class="text-danger">*</span></label>
+          <input class="form-control" name="downstreamModel" value="${escapeHtml(route?.downstreamModel || "")}" required></div>
+        <div class="col-12"><div class="form-check">
+          <input class="form-check-input" type="checkbox" name="enabled" id="model-route-enabled" ${route?.enabled !== false ? "checked" : ""}>
+          <label class="form-check-label" for="model-route-enabled">Enabled</label>
+        </div></div>
+      </div>
+      <div class="mt-4 text-end">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-primary">${route ? "Save" : "Add Route"}</button>
+      </div>
+    </form>`;
+}
+
+function modelPermissionModalHtml() {
+  const roles = state.roles.map((r) => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join("");
+  const providers = state.modelProviders.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  const routes = state.modelRoutes.map((r) => `<option value="${r.id}">${escapeHtml(r.publicName)} - ${escapeHtml(r.providerName)}</option>`).join("");
+
+  return `
+    <form id="model-permission-form">
+      <div class="row g-3">
+        <div class="col-md-4"><label class="form-label">Role</label>
+          <select class="form-select" name="roleId" required><option value="">Choose...</option>${roles}</select></div>
+        <div class="col-md-4"><label class="form-label">Scope</label>
+          <select class="form-select" name="scope" id="model-permission-scope">
+            <option value="1">Model route</option>
+            <option value="0">Entire provider + native API</option>
+          </select></div>
+        <div class="col-md-4" id="model-permission-route-wrap"><label class="form-label">Model route</label>
+          <select class="form-select" name="modelRouteId"><option value="">Choose...</option>${routes}</select></div>
+        <div class="col-md-4 d-none" id="model-permission-provider-wrap"><label class="form-label">Provider</label>
+          <select class="form-select" name="providerId"><option value="">Choose...</option>${providers}</select></div>
+      </div>
+      <div class="mt-4 text-end">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-primary">Grant Access</button>
+      </div>
+    </form>`;
+}
+
+function modelProviderPayload(form) {
+  return {
+    name: form.get("name"),
+    slug: form.get("slug"),
+    kind: Number(form.get("kind")),
+    baseEndpoint: form.get("baseEndpoint") || null,
+    chatPath: form.get("chatPath") || null,
+    enabled: form.get("enabled") === "on",
+    credentialReference: form.get("credentialReference") || null,
+    credentialHeader: form.get("credentialHeader") || "Authorization",
+    credentialPrefix: form.get("credentialPrefix") ?? "Bearer ",
+    awsRegion: form.get("awsRegion") || null,
+    awsAccessKeyReference: form.get("awsAccessKeyReference") || null,
+    awsSecretKeyReference: form.get("awsSecretKeyReference") || null,
+    awsSessionTokenReference: form.get("awsSessionTokenReference") || null
+  };
+}
+
 
 // ---- Users ----
 
@@ -678,6 +880,117 @@ const ACTION_HANDLERS = {
     if (!confirm("Delete this server registration?")) return;
     await api("DELETE", `/admin/servers/${id}`);
     showToast("Server deleted.");
+    await loadAll();
+  },
+
+  "open-add-model-provider": () => {
+    openModal('<i class="bi bi-cpu me-2"></i>Add Model Provider', modelProviderModalHtml());
+    el("model-provider-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api("POST", "/admin/model-providers", modelProviderPayload(new FormData(e.target)));
+        showToast("Model provider added.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "open-edit-model-provider": (id) => {
+    const provider = state.modelProviders.find((p) => p.id === id);
+    openModal('<i class="bi bi-pencil me-2"></i>Edit Model Provider', modelProviderModalHtml(provider));
+    el("model-provider-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api("PUT", `/admin/model-providers/${id}`, modelProviderPayload(new FormData(e.target)));
+        showToast("Model provider updated.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "delete-model-provider": async (id) => {
+    if (!confirm("Delete this model provider, its routes, and associated grants?")) return;
+    await api("DELETE", `/admin/model-providers/${id}`);
+    showToast("Model provider deleted.");
+    await loadAll();
+  },
+  "open-add-model-route": () => {
+    if (!state.modelProviders.length) {
+      showToast("Add a model provider first.", true);
+      return;
+    }
+    openModal('<i class="bi bi-signpost me-2"></i>Add Model Route', modelRouteModalHtml());
+    el("model-route-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      try {
+        await api("POST", "/admin/model-routes", {
+          providerId: form.get("providerId"),
+          publicName: form.get("publicName"),
+          downstreamModel: form.get("downstreamModel"),
+          enabled: form.get("enabled") === "on"
+        });
+        showToast("Model route added.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "open-edit-model-route": (id) => {
+    const route = state.modelRoutes.find((r) => r.id === id);
+    openModal('<i class="bi bi-pencil me-2"></i>Edit Model Route', modelRouteModalHtml(route));
+    el("model-route-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      try {
+        await api("PUT", `/admin/model-routes/${id}`, {
+          providerId: form.get("providerId"),
+          publicName: form.get("publicName"),
+          downstreamModel: form.get("downstreamModel"),
+          enabled: form.get("enabled") === "on"
+        });
+        showToast("Model route updated.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "delete-model-route": async (id) => {
+    if (!confirm("Delete this public model route?")) return;
+    await api("DELETE", `/admin/model-routes/${id}`);
+    showToast("Model route deleted.");
+    await loadAll();
+  },
+  "open-add-model-permission": () => {
+    openModal('<i class="bi bi-shield-plus me-2"></i>Add Model Access Grant', modelPermissionModalHtml());
+    const scope = el("model-permission-scope");
+    const syncScope = () => {
+      const provider = scope.value === "0";
+      el("model-permission-provider-wrap").classList.toggle("d-none", !provider);
+      el("model-permission-route-wrap").classList.toggle("d-none", provider);
+    };
+    scope.addEventListener("change", syncScope);
+    syncScope();
+    el("model-permission-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      const scopeValue = Number(form.get("scope"));
+      try {
+        await api("POST", "/admin/model-permissions", {
+          roleId: form.get("roleId"),
+          scope: scopeValue,
+          providerId: scopeValue === 0 ? form.get("providerId") || null : null,
+          modelRouteId: scopeValue === 1 ? form.get("modelRouteId") || null : null
+        });
+        showToast("Model access granted.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "delete-model-permission": async (id) => {
+    await api("DELETE", `/admin/model-permissions/${id}`);
+    showToast("Model access revoked.");
     await loadAll();
   },
 

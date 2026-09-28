@@ -292,3 +292,70 @@ Use a separate integration environment for PostgreSQL, SQL Server, Redis, OIDC, 
 - Extend `McpServerOptions` and `McpSessionFactory` for new transport or credential modes.
 
 Keep public types and methods XML-documented. The build generates documentation files and reports missing public documentation warnings during development.
+
+## Model Router Architecture
+
+The model router is parallel to the MCP transport rather than embedded inside it. Its code lives under `src/McpProxy/Models` and reuses the existing authentication principal, role resolution, API-key authentication, and claim-role mapping infrastructure.
+
+The durable model entities are:
+
+- `ModelProvider`, which stores the provider kind, public slug, base endpoint, optional unified chat path, and environment-secret references.
+- `ModelRoute`, which maps one globally unique public model name to a provider-specific downstream model ID.
+- `ModelPermission`, which grants a role either provider-wide access or access to one model route.
+
+`PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls the normalized API. A provider-wide grant implies access to all routes owned by that provider, while a route grant never implies native provider access.
+
+`ModelRouterService` implements the normalized `ModelChatRequest` contract and dispatches to protocol adapters for OpenAI-compatible APIs, Ollama, and AWS Bedrock. `GenericHttp` is intentionally native-only. This keeps the normalized surface small while allowing providers with unusual APIs to remain usable without gateway-specific translation code.
+
+`NativeModelProxyService` forwards native requests after removing gateway credentials and hop-by-hop headers. It then applies only the configured downstream credential. The configured gateway API-key header is removed dynamically, not just the default `X-Api-Key`. Native responses are streamed back to the caller.
+
+Bedrock uses the Converse API. A bearer API key can come from the provider credential reference or `AWS_BEARER_TOKEN_BEDROCK`. Otherwise the dependency-free `AwsSigV4Signer` signs requests using credentials resolved from explicit `env:` references or standard AWS environment variables. No AWS SDK dependency is required.
+
+### Model router HTTP surface
+
+Northbound model routes are:
+
+- `GET /models/` to list public aliases visible to the caller.
+- `POST /models/chat` for the normalized chat contract.
+- `/models/native/{providerScope}` and `/models/native/{providerScope}/{**path}` for native provider pass-through.
+
+Administration routes are:
+
+- `GET/POST /admin/model-providers`
+- `PUT/DELETE /admin/model-providers/{id}`
+- `GET/POST /admin/model-routes`
+- `PUT/DELETE /admin/model-routes/{id}`
+- `GET/POST /admin/model-permissions`
+- `DELETE /admin/model-permissions/{id}`
+
+Provider and route administration use `AdminScope.ServerAdmin`. Model permission administration uses `AdminScope.UserAdmin`.
+
+The normalized request is deliberately provider-neutral:
+
+```json
+{
+  "model": "fast-coder",
+  "systemPrompt": "Keep the answer concise.",
+  "prompt": "Explain this function.",
+  "parameters": {
+    "temperature": 0.2,
+    "max_tokens": 800
+  }
+}
+```
+
+OpenAI-compatible parameters pass through except fields owned by the gateway. Ollama parameters are translated into its native request shape. Bedrock inference fields are mapped to `inferenceConfig`, with other model-specific fields placed under `additionalModelRequestFields`.
+
+### Model schema compatibility
+
+The project historically uses `EnsureCreated` rather than EF migrations. Fresh databases receive the model tables from the EF model. `ModelSchemaUpgrade.EnsureAsync` creates only the new model-router tables and indexes for existing SQLite, PostgreSQL, and SQL Server databases. This preserves existing users, roles, API keys, MCP registrations, and permissions when upgrading.
+
+### Model router security rules
+
+- Provider secrets are environment references. Plaintext downstream credentials are never returned by the admin API or persisted in model-provider rows.
+- Northbound `Authorization`, the configured API-key header, cookies, forwarding headers, proxy-auth headers, and hop-by-hop headers are never forwarded to a downstream model provider.
+- Route grants are the least-privilege default for the normalized API. Provider grants should be reserved for clients that need the provider's native API or every model hosted by that provider.
+- Unauthorized models and providers return not-found behavior rather than disclosing registered resources.
+- Unified downstream failures are logged server-side and returned to callers as generic gateway failures so provider response details are not reflected across the security boundary.
+
+The model-router tests cover provider-versus-route authorization, OpenAI-compatible request translation and downstream credential replacement, deterministic Bedrock SigV4 signing, and schema upgrade of an existing SQLite database.

@@ -1,5 +1,6 @@
 using McpProxy.Data;
 using McpProxy.Security;
+using McpProxy.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace McpProxy.Admin;
@@ -14,6 +15,7 @@ public static class DatabaseSeeder
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ProxyDbContext>();
         await db.Database.EnsureCreatedAsync();
+        await ModelSchemaUpgrade.EnsureAsync(db);
 
         if (await db.Users.AnyAsync() || await db.Roles.AnyAsync())
         {

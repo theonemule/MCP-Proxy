@@ -40,6 +40,7 @@ public static class AdminEndpoints
         MapApiKeys(admin.MapGroup("/apikeys").RequireAdminScope(AdminScope.UserAdmin));
         MapClaimMappings(admin.MapGroup("/claim-mappings").RequireAdminScope(AdminScope.UserAdmin));
         MapServers(admin.MapGroup("/servers").RequireAdminScope(AdminScope.ServerAdmin));
+        admin.MapModelAdminEndpoints();
     }
 
     private static void MapRoles(RouteGroupBuilder roles)

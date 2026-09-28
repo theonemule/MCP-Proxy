@@ -40,6 +40,8 @@ public sealed class Role
     public List<ApiKeyRole> ApiKeyRoles { get; set; } = [];
     /// <summary>External identity claim mappings that resolve to this role.</summary>
     public List<ClaimRoleMapping> ClaimMappings { get; set; } = [];
+    /// <summary>Model provider and model-route permissions granted by this role.</summary>
+    public List<ModelPermission> ModelPermissions { get; set; } = [];
 }
 
 /// <summary>
@@ -183,4 +185,111 @@ public sealed class McpServer
 
     /// <summary>Permissions that target this server.</summary>
     public List<Permission> Permissions { get; set; } = [];
+}
+
+
+/// <summary>Native protocol shape used by a downstream model provider.</summary>
+public enum ModelProviderKind
+{
+    /// <summary>OpenAI-compatible chat-completions API, including compatible Foundry/Open WebUI endpoints.</summary>
+    OpenAiCompatible = 0,
+    /// <summary>Ollama native HTTP API.</summary>
+    Ollama = 1,
+    /// <summary>AWS Bedrock Runtime using the Converse API and SigV4 authentication.</summary>
+    AwsBedrock = 2,
+    /// <summary>Arbitrary HTTP provider available through native pass-through only.</summary>
+    GenericHttp = 3
+}
+
+/// <summary>A registered downstream model-hosting provider.</summary>
+public sealed class ModelProvider
+{
+    /// <summary>Stable identifier for the provider.</summary>
+    public Guid Id { get; set; } = Guid.NewGuid();
+    /// <summary>Human-readable provider name.</summary>
+    public required string Name { get; set; }
+    /// <summary>Unique URL-safe provider scope used by native proxy routes.</summary>
+    public required string Slug { get; set; }
+    /// <summary>Provider protocol family used by the unified router.</summary>
+    public ModelProviderKind Kind { get; set; }
+    /// <summary>Base HTTP endpoint. Bedrock may leave this empty to derive the regional runtime endpoint.</summary>
+    public string BaseEndpoint { get; set; } = "";
+    /// <summary>Optional provider-specific unified chat path. Defaults are chosen from <see cref="Kind"/>.</summary>
+    public string? ChatPath { get; set; }
+    /// <summary>Whether the provider may receive traffic.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Optional environment-backed static credential reference for HTTP providers.</summary>
+    public string? CredentialReference { get; set; }
+    /// <summary>Header carrying the resolved static credential.</summary>
+    public string CredentialHeader { get; set; } = "Authorization";
+    /// <summary>Text prepended to the resolved static credential.</summary>
+    public string CredentialPrefix { get; set; } = "Bearer ";
+
+    /// <summary>AWS region used for Bedrock requests.</summary>
+    public string? AwsRegion { get; set; }
+    /// <summary>Optional env reference for an AWS access key; falls back to the standard AWS environment variables.</summary>
+    public string? AwsAccessKeyReference { get; set; }
+    /// <summary>Optional env reference for an AWS secret key; falls back to the standard AWS environment variables.</summary>
+    public string? AwsSecretKeyReference { get; set; }
+    /// <summary>Optional env reference for an AWS session token.</summary>
+    public string? AwsSessionTokenReference { get; set; }
+
+    /// <summary>UTC creation timestamp.</summary>
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>Public model aliases routed through this provider.</summary>
+    public List<ModelRoute> Routes { get; set; } = [];
+    /// <summary>Role grants that authorize native provider access.</summary>
+    public List<ModelPermission> Permissions { get; set; } = [];
+}
+
+/// <summary>A public model alias mapped to a provider-specific model identifier.</summary>
+public sealed class ModelRoute
+{
+    /// <summary>Stable identifier for the route.</summary>
+    public Guid Id { get; set; } = Guid.NewGuid();
+    /// <summary>Owning provider identifier.</summary>
+    public Guid ProviderId { get; set; }
+    /// <summary>Owning provider.</summary>
+    public ModelProvider Provider { get; set; } = null!;
+    /// <summary>Stable northbound model name clients send to the unified router.</summary>
+    public required string PublicName { get; set; }
+    /// <summary>Provider-native model identifier.</summary>
+    public required string DownstreamModel { get; set; }
+    /// <summary>Whether the route may be selected.</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>UTC creation timestamp.</summary>
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>Role grants that authorize this model alias.</summary>
+    public List<ModelPermission> Permissions { get; set; } = [];
+}
+
+/// <summary>Whether a model permission covers a whole provider or one public model route.</summary>
+public enum ModelPermissionScope
+{
+    /// <summary>Allows native provider proxy access and every route on that provider.</summary>
+    Provider = 0,
+    /// <summary>Allows one model route through the unified API.</summary>
+    Route = 1
+}
+
+/// <summary>Role grant for model-provider or public-model access.</summary>
+public sealed class ModelPermission
+{
+    /// <summary>Stable identifier for the grant.</summary>
+    public Guid Id { get; set; } = Guid.NewGuid();
+    /// <summary>Role receiving the grant.</summary>
+    public Guid RoleId { get; set; }
+    /// <summary>Role receiving the grant.</summary>
+    public Role Role { get; set; } = null!;
+    /// <summary>Grant scope.</summary>
+    public ModelPermissionScope Scope { get; set; }
+    /// <summary>Provider identifier for provider-wide grants.</summary>
+    public Guid? ProviderId { get; set; }
+    /// <summary>Provider for provider-wide grants.</summary>
+    public ModelProvider? Provider { get; set; }
+    /// <summary>Model route identifier for route grants.</summary>
+    public Guid? ModelRouteId { get; set; }
+    /// <summary>Model route for route grants.</summary>
+    public ModelRoute? ModelRoute { get; set; }
 }

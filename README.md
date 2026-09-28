@@ -1171,3 +1171,74 @@ For a disposable local reset, stop the application and remove the local SQLite d
 
 - This file, [README.md](README.md), is the complete user and administrator guide.
 - [README.DEVELOPER.md](README.DEVELOPER.md) is the separate complete developer guide covering architecture, source-level contracts, APIs, testing, security implementation, and extension points.
+
+## 19. Model Router
+
+MCP Proxy can also act as a secured model gateway. A model provider represents a downstream hosting platform, while a model route gives a provider-specific model a stable public name.
+
+Supported provider modes are:
+
+- **OpenAI compatible** for services that expose a chat-completions-compatible API, including compatible Microsoft Foundry deployments and Open WebUI-style gateways.
+- **Ollama** for the native `/api/chat` protocol.
+- **AWS Bedrock** through the Bedrock Runtime Converse API with AWS Signature Version 4.
+- **Generic HTTP** for native pass-through when no unified chat adapter is required.
+
+The administration website includes a **Models** tab where administrators can register providers, create public model aliases, and grant model access to roles. Model-provider administration uses the existing MCP/server administration scope. Model access grants use the user/permission administration scope.
+
+### 19.1 Unified model API
+
+The normalized endpoint is:
+
+```text
+POST /models/chat
+```
+
+A request contains the public model alias, user prompt, optional system prompt, and an object of additional provider parameters:
+
+```json
+{
+  "model": "fast-coder",
+  "systemPrompt": "Keep the answer concise.",
+  "prompt": "Explain this function.",
+  "parameters": {
+    "temperature": 0.2,
+    "max_tokens": 800
+  }
+}
+```
+
+The gateway resolves `fast-coder` to its configured provider and downstream model ID. Clients therefore do not need to know whether that model is hosted by Ollama, Foundry, Bedrock, or another compatible provider.
+
+`GET /models/` returns only the public model aliases the authenticated caller is allowed to use.
+
+For OpenAI-compatible providers, extra parameters are passed through except for the gateway-owned `model`, `messages`, and `stream` fields. For Ollama, common native fields stay at the top level and other values are placed under `options`. For Bedrock, standard inference values such as maximum tokens, temperature, top-p, and stop sequences are mapped to `inferenceConfig`; other values are sent as `additionalModelRequestFields`.
+
+### 19.2 Native provider proxy
+
+When an application already speaks a provider's native API, use:
+
+```text
+/models/native/{provider-slug}/{provider-path}
+```
+
+The gateway preserves the downstream HTTP method, remaining path, query string, request body, response status, response headers, and response body. The gateway's own bearer token, API key, cookies, forwarding headers, and other hop-by-hop credentials are stripped before forwarding. The configured downstream credential is added only after that sanitization step.
+
+A **provider-wide** model permission is required for native proxy access because an arbitrary native path cannot safely be reduced to a single model alias. A provider-wide grant also authorizes every public model route on that provider. A **model-route** grant authorizes only that alias through the unified API.
+
+### 19.3 Provider credentials
+
+Static provider credentials are stored as environment references such as:
+
+```text
+env:FOUNDRY_API_KEY
+```
+
+The secret value itself is not written to the proxy database. Configure the header and prefix required by the downstream service. For example, an API-key-based Foundry endpoint may use header `api-key` with an empty prefix, while an OpenAI-compatible service may use `Authorization` with prefix `Bearer `.
+
+Bedrock can use a bearer API key through the provider credential reference or the standard `AWS_BEARER_TOKEN_BEDROCK` environment variable. If no bearer token is configured, the gateway uses SigV4 with provider-specific `env:` references or the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_DEFAULT_REGION` environment variables. Instance-profile and workload-identity credential discovery are not performed automatically.
+
+### 19.4 Example provider setup
+
+For local Ollama, register a provider with base endpoint `http://ollama:11434`, type **Ollama**, and no downstream credential. Create a route such as public name `local-coder` mapped to downstream model `qwen3:14b`.
+
+For an OpenAI-compatible hosted endpoint, register the provider base URL, set the credential reference and header required by the service, then map stable public aliases to the provider's deployment or model IDs. This lets client configuration remain unchanged when the underlying provider or deployment changes.
