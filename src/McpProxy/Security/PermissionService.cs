@@ -29,6 +29,15 @@ public interface IPermissionService
 
     /// <summary>The set of server ids the caller has at least one permission on, for catalog filtering.</summary>
     Task<IReadOnlySet<Guid>> GetAccessibleServerIdsAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
+
+    /// <summary>True when the caller has provider-wide native model access.</summary>
+    Task<bool> CanAccessModelProviderAsync(ClaimsPrincipal user, Guid providerId, CancellationToken cancellationToken);
+
+    /// <summary>True when the caller may use a public model route, directly or through a provider-wide grant.</summary>
+    Task<bool> CanAccessModelRouteAsync(ClaimsPrincipal user, Guid modelRouteId, CancellationToken cancellationToken);
+
+    /// <summary>Public model-route ids visible to the caller.</summary>
+    Task<IReadOnlySet<Guid>> GetAccessibleModelRouteIdsAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -145,5 +154,90 @@ public sealed class PermissionService(ProxyDbContext db) : IPermissionService
         var ids = await db.Permissions.Where(p => roleIds.Contains(p.RoleId))
             .Select(p => p.ServerId).Distinct().ToListAsync(cancellationToken);
         return ids.ToHashSet();
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> CanAccessModelProviderAsync(
+        ClaimsPrincipal user,
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        var roleIds = await ResolveRoleIdsAsync(user, cancellationToken);
+        if (roleIds.Count == 0)
+        {
+            return false;
+        }
+
+        return await db.ModelPermissions.AnyAsync(
+            p => roleIds.Contains(p.RoleId) &&
+                 p.Scope == ModelPermissionScope.Provider &&
+                 p.ProviderId == providerId,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> CanAccessModelRouteAsync(
+        ClaimsPrincipal user,
+        Guid modelRouteId,
+        CancellationToken cancellationToken)
+    {
+        var roleIds = await ResolveRoleIdsAsync(user, cancellationToken);
+        if (roleIds.Count == 0)
+        {
+            return false;
+        }
+
+        var providerId = await db.ModelRoutes
+            .Where(x => x.Id == modelRouteId)
+            .Select(x => (Guid?)x.ProviderId)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (providerId is null)
+        {
+            return false;
+        }
+
+        return await db.ModelPermissions.AnyAsync(
+            p => roleIds.Contains(p.RoleId) &&
+                 ((p.Scope == ModelPermissionScope.Route && p.ModelRouteId == modelRouteId) ||
+                  (p.Scope == ModelPermissionScope.Provider && p.ProviderId == providerId.Value)),
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlySet<Guid>> GetAccessibleModelRouteIdsAsync(
+        ClaimsPrincipal user,
+        CancellationToken cancellationToken)
+    {
+        var roleIds = await ResolveRoleIdsAsync(user, cancellationToken);
+        if (roleIds.Count == 0)
+        {
+            return new HashSet<Guid>();
+        }
+
+        var directRouteIds = await db.ModelPermissions
+            .Where(p => roleIds.Contains(p.RoleId) &&
+                        p.Scope == ModelPermissionScope.Route &&
+                        p.ModelRouteId != null)
+            .Select(p => p.ModelRouteId!.Value)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        var providerIds = await db.ModelPermissions
+            .Where(p => roleIds.Contains(p.RoleId) &&
+                        p.Scope == ModelPermissionScope.Provider &&
+                        p.ProviderId != null)
+            .Select(p => p.ProviderId!.Value)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        if (providerIds.Count > 0)
+        {
+            directRouteIds.AddRange(await db.ModelRoutes
+                .Where(x => providerIds.Contains(x.ProviderId))
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken));
+        }
+
+        return directRouteIds.ToHashSet();
     }
 }

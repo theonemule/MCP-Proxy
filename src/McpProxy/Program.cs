@@ -4,6 +4,7 @@ using McpProxy.Admin;
 using McpProxy.Configuration;
 using McpProxy.Data;
 using McpProxy.Mcp;
+using McpProxy.Models;
 using McpProxy.Registry;
 using McpProxy.Security;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -59,6 +60,8 @@ builder.Services.AddDbContext<ProxyDbContext>(options =>
 
 builder.Services.AddHttpClient("mcp-downstream", client =>
     client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy/2.0"));
+builder.Services.AddHttpClient("model-downstream", client =>
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy-model-router/2.1"));
 
 if (cacheOptions.Enabled && cacheOptions.Provider == CacheProvider.Redis && !string.IsNullOrWhiteSpace(cacheOptions.ConnectionString))
 {
@@ -84,6 +87,8 @@ builder.Services.AddSingleton<DownstreamClientFactory>();
 builder.Services.AddSingleton<CatalogCache>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CatalogCache>());
 builder.Services.AddScoped<GatewayService>();
+builder.Services.AddScoped<ModelRouterService>();
+builder.Services.AddScoped<NativeModelProxyService>();
 
 var signingKeyBytes = !string.IsNullOrWhiteSpace(authOptions.SigningKey)
     ? Convert.FromBase64String(authOptions.SigningKey)
@@ -397,6 +402,7 @@ app.UseAuthorization();
 
 app.MapAuthEndpoints();
 app.MapAdminEndpoints();
+app.MapModelRouterEndpoints(authOptions.Enabled);
 
 // The combined endpoint carries no scope; the per-server endpoint's route value is read by
 // McpEndpointScope and narrows every handler above to that one server's catalog.
