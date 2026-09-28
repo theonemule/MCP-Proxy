@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using ModelContextProtocol.Protocol;
+using ModelContextProtocol.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -59,9 +60,9 @@ builder.Services.AddDbContext<ProxyDbContext>(options =>
 });
 
 builder.Services.AddHttpClient("mcp-downstream", client =>
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy/2.0"));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy/2.2.0"));
 builder.Services.AddHttpClient("model-downstream", client =>
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy-model-router/2.1"));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-proxy-model-router/2.2.0"));
 
 if (cacheOptions.Enabled && cacheOptions.Provider == CacheProvider.Redis && !string.IsNullOrWhiteSpace(cacheOptions.ConnectionString))
 {
@@ -311,9 +312,14 @@ builder.Services.AddAuthorization();
 
 builder.Services.AddMcpServer(options =>
     {
-        options.ServerInfo = new Implementation { Name = "mcp-proxy", Version = "2.0.0" };
+        options.ServerInfo = new Implementation { Name = "mcp-proxy", Version = "2.2.0" };
     })
-    .WithHttpTransport(options => options.Stateless = true)
+    .WithHttpTransport(options =>
+    {
+        // MCP 2026-07-28 and later are sessionless. The SDK still accepts older initialize-era
+        // clients on the same endpoint and the v2 client automatically negotiates downstream.
+        options.SessionMode = HttpServerSessionMode.Stateless;
+    })
     .WithListToolsHandler(async (context, cancellationToken) =>
     {
         var gateway = context.Services!.GetRequiredService<GatewayService>();

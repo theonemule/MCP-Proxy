@@ -1172,7 +1172,17 @@ For a disposable local reset, stop the application and remove the local SQLite d
 - This file, [README.md](README.md), is the complete user and administrator guide.
 - [README.DEVELOPER.md](README.DEVELOPER.md) is the separate complete developer guide covering architecture, source-level contracts, APIs, testing, security implementation, and extension points.
 
-## 19. Model Router
+## 19. Modern MCP Protocol Support
+
+The proxy uses the Model Context Protocol C# SDK 2.2 and serves the current `2026-07-28` protocol revision over Streamable HTTP.
+
+The northbound MCP endpoints are explicitly configured as stateless. Modern clients can call `server/discover` and then make self-contained requests carrying `MCP-Protocol-Version: 2026-07-28`; the proxy does not mint or require `Mcp-Session-Id` for those requests. The same endpoint remains compatible with initialize-era clients such as `2025-11-25`.
+
+Downstream connections also use the 2.x MCP client and are not pinned to a legacy protocol revision. The client negotiates the modern revision when the downstream server supports it and falls back to an initialize-era revision when necessary.
+
+The gateway continues to proxy tools, resources, and prompts through the same RBAC boundary. Protocol lifecycle and transport-version differences are handled by the MCP SDK rather than leaking into provider registrations.
+
+## 20. Model Router
 
 MCP Proxy can also act as a secured model gateway. A model provider represents a downstream hosting platform, while a model route gives a provider-specific model a stable public name.
 
@@ -1185,13 +1195,15 @@ Supported provider modes are:
 
 The administration website includes a **Models** tab where administrators can register providers, create public model aliases, and grant model access to roles. Model-provider administration uses the existing MCP/server administration scope. Model access grants use the user/permission administration scope.
 
-### 19.1 Unified model API
+### 20.1 Unified model API
 
 The normalized endpoint is:
 
 ```text
 POST /models/chat
 ```
+
+The same endpoint supports buffered JSON or streaming Server-Sent Events (SSE). Set `"stream": true` to stream, or use the explicit `POST /models/chat/stream` alias. Streaming responses emit `start`, `delta`, optional `usage`, `done`, and `error` events. Each `delta` carries incremental assistant text and each event identifies the public model, provider, and downstream model.
 
 A request contains the public model alias, user prompt, optional system prompt, and an object of additional provider parameters:
 
@@ -1200,6 +1212,7 @@ A request contains the public model alias, user prompt, optional system prompt, 
   "model": "fast-coder",
   "systemPrompt": "Keep the answer concise.",
   "prompt": "Explain this function.",
+  "stream": true,
   "parameters": {
     "temperature": 0.2,
     "max_tokens": 800
@@ -1213,7 +1226,9 @@ The gateway resolves `fast-coder` to its configured provider and downstream mode
 
 For OpenAI-compatible providers, extra parameters are passed through except for the gateway-owned `model`, `messages`, and `stream` fields. For Ollama, common native fields stay at the top level and other values are placed under `options`. For Bedrock, standard inference values such as maximum tokens, temperature, top-p, and stop sequences are mapped to `inferenceConfig`; other values are sent as `additionalModelRequestFields`.
 
-### 19.2 Native provider proxy
+Unified streaming is implemented using each provider's native streaming mechanism: OpenAI-compatible SSE, Ollama's streaming NDJSON response, and Bedrock `ConverseStream`. Bedrock EventStream frames are decoded and normalized into the gateway SSE contract. The native provider proxy remains a byte-streaming pass-through, so provider-specific streaming APIs are also available without normalization.
+
+### 20.2 Native provider proxy
 
 When an application already speaks a provider's native API, use:
 
@@ -1225,7 +1240,7 @@ The gateway preserves the downstream HTTP method, remaining path, query string, 
 
 A **provider-wide** model permission is required for native proxy access because an arbitrary native path cannot safely be reduced to a single model alias. A provider-wide grant also authorizes every public model route on that provider. A **model-route** grant authorizes only that alias through the unified API.
 
-### 19.3 Provider credentials
+### 20.3 Provider credentials
 
 Static provider credentials are stored as environment references such as:
 
@@ -1237,7 +1252,7 @@ The secret value itself is not written to the proxy database. Configure the head
 
 Bedrock can use a bearer API key through the provider credential reference or the standard `AWS_BEARER_TOKEN_BEDROCK` environment variable. If no bearer token is configured, the gateway uses SigV4 with provider-specific `env:` references or the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_DEFAULT_REGION` environment variables. Instance-profile and workload-identity credential discovery are not performed automatically.
 
-### 19.4 Example provider setup
+### 20.4 Example provider setup
 
 For local Ollama, register a provider with base endpoint `http://ollama:11434`, type **Ollama**, and no downstream credential. Create a route such as public name `local-coder` mapped to downstream model `qwen3:14b`.
 

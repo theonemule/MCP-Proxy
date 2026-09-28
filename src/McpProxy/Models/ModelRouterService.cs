@@ -13,7 +13,8 @@ public sealed record ModelChatRequest(
     string Model,
     string Prompt,
     string? SystemPrompt,
-    Dictionary<string, JsonElement>? Parameters);
+    Dictionary<string, JsonElement>? Parameters,
+    bool Stream = false);
 
 /// <summary>Provider-neutral response returned by the unified model endpoint.</summary>
 public sealed record ModelChatResponse(
@@ -23,6 +24,16 @@ public sealed record ModelChatResponse(
     string Text,
     string? FinishReason,
     JsonNode? Usage);
+
+/// <summary>One provider-neutral event emitted by a streaming model response.</summary>
+public sealed record ModelChatStreamEvent(
+    string Event,
+    string Model,
+    string Provider,
+    string DownstreamModel,
+    string? Text = null,
+    string? FinishReason = null,
+    JsonNode? Usage = null);
 
 /// <summary>Routes provider-neutral model requests to provider-specific HTTP protocols.</summary>
 public sealed class ModelRouterService(
@@ -48,7 +59,9 @@ public sealed class ModelRouterService(
             {
                 name = x.PublicName,
                 provider = x.Provider.Name,
-                providerKind = x.Provider.Kind.ToString()
+                providerKind = x.Provider.Kind.ToString(),
+                supportsUnifiedStreaming = x.Provider.Kind != ModelProviderKind.GenericHttp,
+                nativeProxy = "/models/native/" + x.Provider.Slug + "/..."
             })
             .ToListAsync(cancellationToken);
     }
@@ -59,20 +72,7 @@ public sealed class ModelRouterService(
         ModelChatRequest request,
         CancellationToken cancellationToken)
     {
-        var route = await db.ModelRoutes.AsNoTracking()
-            .Include(x => x.Provider)
-            .SingleOrDefaultAsync(x => x.PublicName == request.Model && x.Enabled && x.Provider.Enabled, cancellationToken);
-
-        if (route is null ||
-            !await permissions.CanAccessModelRouteAsync(user, route.Id, cancellationToken))
-        {
-            throw new KeyNotFoundException("Model not found.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Prompt))
-        {
-            throw new ArgumentException("Prompt is required.", nameof(request));
-        }
+        var route = await ResolveRouteAsync(user, request, cancellationToken);
 
         return route.Provider.Kind switch
         {
@@ -119,44 +119,7 @@ public sealed class ModelRouterService(
         ModelChatRequest request,
         CancellationToken cancellationToken)
     {
-        var body = new JsonObject
-        {
-            ["model"] = route.DownstreamModel,
-            ["stream"] = false,
-            ["messages"] = BuildMessages(request)
-        };
-
-        if (request.Parameters is { Count: > 0 })
-        {
-            var options = new JsonObject();
-            foreach (var pair in request.Parameters)
-            {
-                if (pair.Key.Equals("stream", StringComparison.OrdinalIgnoreCase) ||
-                    pair.Key.Equals("model", StringComparison.OrdinalIgnoreCase) ||
-                    pair.Key.Equals("messages", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (pair.Key is "format" or "keep_alive" or "think" or "tools")
-                {
-                    body[pair.Key] = ParseElement(pair.Value);
-                }
-                else if (pair.Key == "options" && pair.Value.ValueKind == JsonValueKind.Object)
-                {
-                    body["options"] = ParseElement(pair.Value);
-                }
-                else
-                {
-                    options[pair.Key] = ParseElement(pair.Value);
-                }
-            }
-
-            if (options.Count > 0 && body["options"] is null)
-            {
-                body["options"] = options;
-            }
-        }
+        var body = BuildOllamaBody(route, request, stream: false);
 
         var provider = route.Provider;
         var path = string.IsNullOrWhiteSpace(provider.ChatPath) ? "/api/chat" : provider.ChatPath!;
@@ -189,7 +152,315 @@ public sealed class ModelRouterService(
         CancellationToken cancellationToken)
     {
         var provider = route.Provider;
-        var credentials = ModelCredentialResolver.ResolveAwsCredentials(provider);
+        var body = BuildBedrockBody(request);
+        var endpoint = ResolveBedrockEndpoint(provider);
+        var uri = new Uri(
+            endpoint.TrimEnd('/') + "/model/" + Uri.EscapeDataString(route.DownstreamModel) + "/converse",
+            UriKind.Absolute);
+
+        var response = await SendJsonAsync(provider, uri, body, true, cancellationToken);
+        var content = response["output"]?["message"]?["content"] as JsonArray;
+        var text = content is null
+            ? null
+            : string.Concat(content
+                .Select(x => x?["text"]?.GetValue<string>())
+                .Where(x => !string.IsNullOrEmpty(x)));
+
+        if (string.IsNullOrEmpty(text))
+        {
+            throw new InvalidOperationException("Downstream Bedrock response did not contain assistant text.");
+        }
+
+        return new ModelChatResponse(
+            route.PublicName,
+            provider.Name,
+            route.DownstreamModel,
+            text,
+            response["stopReason"]?.GetValue<string>(),
+            response["usage"]?.DeepClone());
+    }
+
+    /// <summary>Streams a public model alias as provider-neutral start/delta/usage/done events.</summary>
+    public async IAsyncEnumerable<ModelChatStreamEvent> StreamChatAsync(
+        System.Security.Claims.ClaimsPrincipal user,
+        ModelChatRequest request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var route = await ResolveRouteAsync(user, request, cancellationToken);
+        if (route.Provider.Kind == ModelProviderKind.GenericHttp)
+        {
+            throw new InvalidOperationException(
+                $"Provider '{route.Provider.Name}' is native-proxy only and has no unified streaming adapter.");
+        }
+
+        yield return StreamEvent("start", route);
+
+        switch (route.Provider.Kind)
+        {
+            case ModelProviderKind.OpenAiCompatible:
+                await foreach (var item in StreamOpenAiCompatibleAsync(route, request, cancellationToken))
+                {
+                    yield return item;
+                }
+                break;
+
+            case ModelProviderKind.Ollama:
+                await foreach (var item in StreamOllamaAsync(route, request, cancellationToken))
+                {
+                    yield return item;
+                }
+                break;
+
+            case ModelProviderKind.AwsBedrock:
+                await foreach (var item in StreamBedrockAsync(route, request, cancellationToken))
+                {
+                    yield return item;
+                }
+                break;
+
+            default:
+                throw new InvalidOperationException($"Unsupported model provider kind '{route.Provider.Kind}'.");
+        }
+    }
+
+    private async IAsyncEnumerable<ModelChatStreamEvent> StreamOpenAiCompatibleAsync(
+        ModelRoute route,
+        ModelChatRequest request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var body = new JsonObject
+        {
+            ["model"] = route.DownstreamModel,
+            ["stream"] = true,
+            ["messages"] = BuildMessages(request)
+        };
+        ApplyParameters(body, request.Parameters, ["model", "messages", "stream"]);
+
+        var provider = route.Provider;
+        var path = string.IsNullOrWhiteSpace(provider.ChatPath) ? "/v1/chat/completions" : provider.ChatPath!;
+        using var response = await SendStreamingResponseAsync(
+            provider,
+            BuildProviderUri(provider, path),
+            body,
+            false,
+            cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+
+        string? finishReason = null;
+        JsonNode? usage = null;
+
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var data = line[5..].TrimStart();
+            if (data == "[DONE]")
+            {
+                break;
+            }
+
+            JsonObject chunk;
+            try
+            {
+                chunk = JsonNode.Parse(data)?.AsObject() ?? new JsonObject();
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            var choices = chunk["choices"] as JsonArray;
+            var choice = choices is { Count: > 0 } ? choices[0] : null;
+            var text = choice?["delta"]?["content"]?.GetValue<string>()
+                ?? ExtractTextArray(choice?["delta"]?["content"]);
+            if (!string.IsNullOrEmpty(text))
+            {
+                yield return StreamEvent("delta", route, text: text);
+            }
+
+            finishReason ??= choice?["finish_reason"]?.GetValue<string>();
+            if (chunk["usage"] is not null)
+            {
+                usage = chunk["usage"]!.DeepClone();
+                yield return StreamEvent("usage", route, usage: usage.DeepClone());
+            }
+        }
+
+        yield return StreamEvent("done", route, finishReason: finishReason, usage: usage);
+    }
+
+    private async IAsyncEnumerable<ModelChatStreamEvent> StreamOllamaAsync(
+        ModelRoute route,
+        ModelChatRequest request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var body = BuildOllamaBody(route, request, stream: true);
+        var provider = route.Provider;
+        var path = string.IsNullOrWhiteSpace(provider.ChatPath) ? "/api/chat" : provider.ChatPath!;
+
+        using var response = await SendStreamingResponseAsync(
+            provider,
+            BuildProviderUri(provider, path),
+            body,
+            false,
+            cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+
+        string? finishReason = null;
+        JsonNode? usage = null;
+
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            JsonObject chunk;
+            try
+            {
+                chunk = JsonNode.Parse(line)?.AsObject() ?? new JsonObject();
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            var text = chunk["message"]?["content"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(text))
+            {
+                yield return StreamEvent("delta", route, text: text);
+            }
+
+            if (chunk["done"]?.GetValue<bool>() == true)
+            {
+                finishReason = chunk["done_reason"]?.GetValue<string>();
+                if (chunk["prompt_eval_count"] is not null || chunk["eval_count"] is not null)
+                {
+                    usage = new JsonObject
+                    {
+                        ["promptTokens"] = chunk["prompt_eval_count"]?.DeepClone(),
+                        ["completionTokens"] = chunk["eval_count"]?.DeepClone()
+                    };
+                    yield return StreamEvent("usage", route, usage: usage.DeepClone());
+                }
+                break;
+            }
+        }
+
+        yield return StreamEvent("done", route, finishReason: finishReason, usage: usage);
+    }
+
+    private async IAsyncEnumerable<ModelChatStreamEvent> StreamBedrockAsync(
+        ModelRoute route,
+        ModelChatRequest request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var provider = route.Provider;
+        var body = BuildBedrockBody(request);
+        var endpoint = ResolveBedrockEndpoint(provider);
+        var uri = new Uri(
+            endpoint.TrimEnd('/') + "/model/" + Uri.EscapeDataString(route.DownstreamModel) + "/converse-stream",
+            UriKind.Absolute);
+
+        using var response = await SendStreamingResponseAsync(provider, uri, body, true, cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+
+        string? finishReason = null;
+        JsonNode? usage = null;
+
+        await foreach (var message in AwsEventStreamReader.ReadAsync(stream, cancellationToken))
+        {
+            message.Headers.TryGetValue(":event-type", out var eventType);
+            message.Headers.TryGetValue(":message-type", out var messageType);
+
+            JsonObject payload;
+            try
+            {
+                payload = message.Payload.Length == 0
+                    ? new JsonObject()
+                    : JsonNode.Parse(message.Payload)?.AsObject() ?? new JsonObject();
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException("Bedrock returned invalid JSON inside an EventStream message.", ex);
+            }
+
+            if (string.Equals(messageType, "exception", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Bedrock streaming request failed with event '{eventType ?? "unknown"}'.");
+            }
+
+            switch (eventType)
+            {
+                case "contentBlockDelta":
+                    var delta = payload["delta"] ?? payload["contentBlockDelta"]?["delta"];
+                    var text = delta?["text"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        yield return StreamEvent("delta", route, text: text);
+                    }
+                    break;
+
+                case "messageStop":
+                    finishReason = payload["stopReason"]?.GetValue<string>()
+                        ?? payload["messageStop"]?["stopReason"]?.GetValue<string>();
+                    break;
+
+                case "metadata":
+                    usage = payload["usage"]?.DeepClone()
+                        ?? payload["metadata"]?["usage"]?.DeepClone();
+                    if (usage is not null)
+                    {
+                        yield return StreamEvent("usage", route, usage: usage.DeepClone());
+                    }
+                    break;
+            }
+        }
+
+        yield return StreamEvent("done", route, finishReason: finishReason, usage: usage);
+    }
+
+    private async Task<ModelRoute> ResolveRouteAsync(
+        System.Security.Claims.ClaimsPrincipal user,
+        ModelChatRequest request,
+        CancellationToken cancellationToken)
+    {
+        var route = await db.ModelRoutes.AsNoTracking()
+            .Include(x => x.Provider)
+            .SingleOrDefaultAsync(
+                x => x.PublicName == request.Model && x.Enabled && x.Provider.Enabled,
+                cancellationToken);
+
+        if (route is null ||
+            !await permissions.CanAccessModelRouteAsync(user, route.Id, cancellationToken))
+        {
+            throw new KeyNotFoundException("Model not found.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Prompt))
+        {
+            throw new ArgumentException("Prompt is required.", nameof(request));
+        }
+
+        return route;
+    }
+
+    private static ModelChatStreamEvent StreamEvent(
+        string eventName,
+        ModelRoute route,
+        string? text = null,
+        string? finishReason = null,
+        JsonNode? usage = null) =>
+        new(eventName, route.PublicName, route.Provider.Name, route.DownstreamModel, text, finishReason, usage);
+
+    private static JsonObject BuildBedrockBody(ModelChatRequest request)
+    {
         var body = new JsonObject
         {
             ["messages"] = new JsonArray
@@ -238,37 +509,42 @@ public sealed class ModelRouterService(
 
         if (inference.Count > 0) body["inferenceConfig"] = inference;
         if (additional.Count > 0) body["additionalModelRequestFields"] = additional;
+        return body;
+    }
 
-        var endpoint = string.IsNullOrWhiteSpace(provider.BaseEndpoint)
-            ? $"https://bedrock-runtime.{credentials.Region}.amazonaws.com"
-            : provider.BaseEndpoint;
-        var uri = new Uri(
-            endpoint.TrimEnd('/') + "/model/" + Uri.EscapeDataString(route.DownstreamModel) + "/converse",
-            UriKind.Absolute);
-
-        var response = await SendJsonAsync(provider, uri, body, true, cancellationToken);
-        var content = response["output"]?["message"]?["content"] as JsonArray;
-        var text = content is null
-            ? null
-            : string.Concat(content
-                .Select(x => x?["text"]?.GetValue<string>())
-                .Where(x => !string.IsNullOrEmpty(x)));
-
-        if (string.IsNullOrEmpty(text))
+    private static string ResolveBedrockEndpoint(ModelProvider provider)
+    {
+        if (!string.IsNullOrWhiteSpace(provider.BaseEndpoint))
         {
-            throw new InvalidOperationException("Downstream Bedrock response did not contain assistant text.");
+            return provider.BaseEndpoint;
         }
 
-        return new ModelChatResponse(
-            route.PublicName,
-            provider.Name,
-            route.DownstreamModel,
-            text,
-            response["stopReason"]?.GetValue<string>(),
-            response["usage"]?.DeepClone());
+        var region = ModelCredentialResolver.ResolveAwsRegion(provider);
+        return $"https://bedrock-runtime.{region}.amazonaws.com";
     }
 
     private async Task<JsonObject> SendJsonAsync(
+        ModelProvider provider,
+        Uri uri,
+        JsonObject body,
+        bool signForBedrock,
+        CancellationToken cancellationToken)
+    {
+        using var response = await SendStreamingResponseAsync(provider, uri, body, signForBedrock, cancellationToken);
+        var text = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        try
+        {
+            return JsonNode.Parse(text)?.AsObject()
+                ?? throw new InvalidOperationException("Downstream model provider returned an empty JSON response.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("Downstream model provider returned invalid JSON.", ex);
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendStreamingResponseAsync(
         ModelProvider provider,
         Uri uri,
         JsonObject body,
@@ -307,24 +583,69 @@ public sealed class ModelRouterService(
         }
 
         var client = httpClientFactory.CreateClient("model-downstream");
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        var text = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (response.IsSuccessStatusCode)
         {
-            var safeBody = text.Length > 2048 ? text[..2048] : text;
-            throw new InvalidOperationException(
-                $"Downstream model provider returned {(int)response.StatusCode} {response.ReasonPhrase}: {safeBody}");
+            return response;
         }
 
         try
         {
-            return JsonNode.Parse(text)?.AsObject()
-                ?? throw new InvalidOperationException("Downstream model provider returned an empty JSON response.");
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            var safeBody = text.Length > 2048 ? text[..2048] : text;
+            throw new InvalidOperationException(
+                $"Downstream model provider returned {(int)response.StatusCode} {response.ReasonPhrase}: {safeBody}");
         }
-        catch (JsonException ex)
+        finally
         {
-            throw new InvalidOperationException("Downstream model provider returned invalid JSON.", ex);
+            response.Dispose();
         }
+    }
+
+    private static JsonObject BuildOllamaBody(ModelRoute route, ModelChatRequest request, bool stream)
+    {
+        var body = new JsonObject
+        {
+            ["model"] = route.DownstreamModel,
+            ["stream"] = stream,
+            ["messages"] = BuildMessages(request)
+        };
+
+        if (request.Parameters is not { Count: > 0 })
+        {
+            return body;
+        }
+
+        var options = new JsonObject();
+        foreach (var pair in request.Parameters)
+        {
+            if (pair.Key.Equals("stream", StringComparison.OrdinalIgnoreCase) ||
+                pair.Key.Equals("model", StringComparison.OrdinalIgnoreCase) ||
+                pair.Key.Equals("messages", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (pair.Key is "format" or "keep_alive" or "think" or "tools")
+            {
+                body[pair.Key] = ParseElement(pair.Value);
+            }
+            else if (pair.Key == "options" && pair.Value.ValueKind == JsonValueKind.Object)
+            {
+                body["options"] = ParseElement(pair.Value);
+            }
+            else
+            {
+                options[pair.Key] = ParseElement(pair.Value);
+            }
+        }
+
+        if (options.Count > 0 && body["options"] is null)
+        {
+            body["options"] = options;
+        }
+
+        return body;
     }
 
     private static JsonArray BuildMessages(ModelChatRequest request)

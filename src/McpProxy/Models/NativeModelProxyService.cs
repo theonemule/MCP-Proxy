@@ -84,8 +84,8 @@ public sealed class NativeModelProxyService(
         string endpoint;
         if (provider.Kind == ModelProviderKind.AwsBedrock && string.IsNullOrWhiteSpace(provider.BaseEndpoint))
         {
-            var credentials = ModelCredentialResolver.ResolveAwsCredentials(provider);
-            endpoint = $"https://bedrock-runtime.{credentials.Region}.amazonaws.com";
+            var region = ModelCredentialResolver.ResolveAwsRegion(provider);
+            endpoint = $"https://bedrock-runtime.{region}.amazonaws.com";
         }
         else
         {

@@ -52,6 +52,22 @@ public static class ModelCredentialResolver
         };
     }
 
+    /// <summary>Resolves the AWS region without requiring IAM credentials, allowing Bedrock bearer-token auth.</summary>
+    public static string ResolveAwsRegion(ModelProvider provider)
+    {
+        var region = provider.AwsRegion
+            ?? Environment.GetEnvironmentVariable("AWS_REGION")
+            ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+
+        if (string.IsNullOrWhiteSpace(region))
+        {
+            throw new InvalidOperationException(
+                $"AWS region for model provider '{provider.Name}' is not configured.");
+        }
+
+        return region;
+    }
+
     /// <summary>Resolves AWS credentials and region from explicit env references or standard AWS environment names.</summary>
     public static AwsCredentialSet ResolveAwsCredentials(ModelProvider provider)
     {
@@ -61,21 +77,13 @@ public static class ModelCredentialResolver
             ?? Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
         var sessionToken = ResolveOptionalSecret(provider.AwsSessionTokenReference)
             ?? Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN");
-        var region = provider.AwsRegion
-            ?? Environment.GetEnvironmentVariable("AWS_REGION")
-            ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+        var region = ResolveAwsRegion(provider);
 
         if (string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey))
         {
             throw new InvalidOperationException(
                 $"AWS credentials for model provider '{provider.Name}' are not configured. " +
                 "Set the provider env references or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.");
-        }
-
-        if (string.IsNullOrWhiteSpace(region))
-        {
-            throw new InvalidOperationException(
-                $"AWS region for model provider '{provider.Name}' is not configured.");
         }
 
         return new AwsCredentialSet(accessKey, secretKey, sessionToken, region);
