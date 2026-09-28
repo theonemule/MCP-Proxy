@@ -106,6 +106,119 @@ public sealed class OpenAiCompatibilityTests
     }
 
     [Fact]
+    public async Task Generic_openai_v1_operation_routes_by_model_and_rewrites_nested_model_identity()
+    {
+        var handler = new GenericOpenAiHandler();
+        var fixture = await CreateAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://provider.example/v1",
+            handler);
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "model":"public-model",
+              "input":"Hello",
+              "metadata":{"test":"value"}
+            }
+            """)!.AsObject();
+
+        var response = await fixture.Service.ForwardOpenAiOperationAsync(
+            fixture.Principal,
+            "responses",
+            request,
+            default);
+
+        Assert.Equal("public-model", response["model"]?.GetValue<string>());
+        Assert.Equal("public-model", response["nested"]?["model"]?.GetValue<string>());
+        Assert.Equal("https://provider.example/v1/responses", handler.LastRequest?.RequestUri?.ToString());
+
+        var downstream = JsonNode.Parse(handler.LastBody!)!.AsObject();
+        Assert.Equal("downstream-model", downstream["model"]?.GetValue<string>());
+        Assert.Equal("Hello", downstream["input"]?.GetValue<string>());
+        Assert.Equal("value", downstream["metadata"]?["test"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Generic_openai_stream_preserves_event_names_and_rewrites_model_identity()
+    {
+        var handler = new GenericOpenAiHandler(streaming: true);
+        var fixture = await CreateAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://provider.example/v1",
+            handler);
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "model":"public-model",
+              "input":"Hello",
+              "stream":true
+            }
+            """)!.AsObject();
+
+        var records = new List<OpenAiCompatibilityService.StreamRecord>();
+        await foreach (var record in fixture.Service.StreamOpenAiOperationAsync(
+            fixture.Principal,
+            "responses",
+            request,
+            default))
+        {
+            records.Add(record);
+        }
+
+        Assert.Equal(2, records.Count);
+        Assert.Equal("response.created", records[0].EventName);
+        Assert.Equal("response.completed", records[1].EventName);
+
+        var created = JsonNode.Parse(records[0].Data)!.AsObject();
+        Assert.Equal("public-model", created["response"]?["model"]?.GetValue<string>());
+        var completed = JsonNode.Parse(records[1].Data)!.AsObject();
+        Assert.Equal("public-model", completed["response"]?["model"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Bedrock_openai_v1_operation_uses_openai_runtime_path_and_bearer_key()
+    {
+        Environment.SetEnvironmentVariable("OPENAI_GENERIC_BEDROCK_KEY", "bedrock-openai-key");
+        try
+        {
+            var handler = new GenericOpenAiHandler();
+            var fixture = await CreateAsync(
+                ModelProviderKind.AwsBedrock,
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                handler,
+                credentialReference: "env:OPENAI_GENERIC_BEDROCK_KEY");
+
+            var request = JsonNode.Parse(
+                """
+                {
+                  "model":"public-model",
+                  "input":"Hello"
+                }
+                """)!.AsObject();
+
+            var response = await fixture.Service.ForwardOpenAiOperationAsync(
+                fixture.Principal,
+                "responses",
+                request,
+                default);
+
+            Assert.Equal(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses",
+                handler.LastRequest?.RequestUri?.ToString());
+            Assert.Equal(
+                "Bearer bedrock-openai-key",
+                handler.LastRequest?.Headers.Authorization?.ToString());
+            Assert.Equal("public-model", response["model"]?.GetValue<string>());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("OPENAI_GENERIC_BEDROCK_KEY", null);
+        }
+    }
+
+    [Fact]
     public async Task Ollama_is_adapted_to_openai_chat_completion_shape()
     {
         var handler = new OllamaHandler();
@@ -311,6 +424,44 @@ public sealed class OpenAiCompatibilityTests
                     }
                   ],
                   "usage":{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}
+                }
+                """);
+        }
+    }
+
+    private sealed class GenericOpenAiHandler(bool streaming = false) : HttpMessageHandler
+    {
+        public HttpRequestMessage? LastRequest { get; private set; }
+        public string? LastBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            LastBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            if (streaming)
+            {
+                const string body =
+                    "event: response.created\n" +
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"downstream-model\"}}\n\n" +
+                    "event: response.completed\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"downstream-model\"}}\n\n";
+                return Response("text/event-stream", body);
+            }
+
+            return Response(
+                "application/json",
+                """
+                {
+                  "id":"resp_1",
+                  "object":"response",
+                  "model":"downstream-model",
+                  "nested":{"model":"downstream-model"},
+                  "output":[]
                 }
                 """);
         }

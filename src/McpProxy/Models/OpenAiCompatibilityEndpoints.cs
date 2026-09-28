@@ -7,7 +7,7 @@ namespace McpProxy.Models;
 /// <summary>Maps the OpenAI-compatible northbound model API.</summary>
 public static class OpenAiCompatibilityEndpoints
 {
-    /// <summary>Maps OpenAI v1 Models and Chat Completions endpoints.</summary>
+    /// <summary>Maps OpenAI v1 Models, Chat Completions, and generic JSON inference endpoints.</summary>
     public static void MapOpenAiCompatibilityEndpoints(this WebApplication app, bool requireAuthorization)
     {
         var v1 = app.MapGroup("/v1");
@@ -19,6 +19,7 @@ public static class OpenAiCompatibilityEndpoints
         v1.MapGet("/models", ListModelsAsync);
         v1.MapGet("/models/{**model}", GetModelAsync);
         v1.MapPost("/chat/completions", ChatCompletionsAsync);
+        v1.MapPost("/{**operation}", GenericOpenAiOperationAsync);
     }
 
     private static async Task ListModelsAsync(
@@ -55,6 +56,151 @@ public static class OpenAiCompatibilityEndpoints
         }
     }
 
+    private static async Task GenericOpenAiOperationAsync(
+        string operation,
+        HttpContext context,
+        OpenAiCompatibilityService service,
+        ILogger<OpenAiCompatibilityService> logger,
+        CancellationToken cancellationToken)
+    {
+        SetRequestId(context);
+
+        JsonObject request;
+        try
+        {
+            request = await ReadJsonObjectAsync(context, cancellationToken);
+        }
+        catch (JsonException)
+        {
+            await WriteErrorAsync(
+                context,
+                new OpenAiCompatibilityException(
+                    "invalid_request_error",
+                    "The request body is not valid JSON.",
+                    null,
+                    null),
+                cancellationToken);
+            return;
+        }
+
+        if (request["stream"]?.GetValue<bool?>() == true)
+        {
+            await StreamGenericOpenAiOperationAsync(
+                operation,
+                context,
+                service,
+                request,
+                logger,
+                cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var response = await service.ForwardOpenAiOperationAsync(
+                context.User,
+                operation,
+                request,
+                cancellationToken);
+            await WriteJsonAsync(context, response, StatusCodes.Status200OK, cancellationToken);
+        }
+        catch (OpenAiCompatibilityException ex)
+        {
+            await WriteErrorAsync(context, ex, cancellationToken);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException)
+        {
+            logger.LogWarning(
+                ex,
+                "OpenAI-compatible operation {Operation} failed for model {Model}",
+                operation,
+                request["model"]);
+            await WriteErrorAsync(
+                context,
+                new OpenAiCompatibilityException(
+                    "api_error",
+                    "The upstream model provider request failed.",
+                    null,
+                    "upstream_error",
+                    StatusCodes.Status502BadGateway),
+                cancellationToken);
+        }
+    }
+
+    private static async Task StreamGenericOpenAiOperationAsync(
+        string operation,
+        HttpContext context,
+        OpenAiCompatibilityService service,
+        JsonObject request,
+        ILogger<OpenAiCompatibilityService> logger,
+        CancellationToken cancellationToken)
+    {
+        await using var enumerator = service.StreamOpenAiOperationAsync(
+            context.User,
+            operation,
+            request,
+            cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+        bool hasFirst;
+        try
+        {
+            hasFirst = await enumerator.MoveNextAsync();
+        }
+        catch (OpenAiCompatibilityException ex)
+        {
+            await WriteErrorAsync(context, ex, cancellationToken);
+            return;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException)
+        {
+            logger.LogWarning(
+                ex,
+                "OpenAI-compatible streaming operation {Operation} failed before response start for model {Model}",
+                operation,
+                request["model"]);
+            await WriteErrorAsync(
+                context,
+                new OpenAiCompatibilityException(
+                    "api_error",
+                    "The upstream model provider request failed.",
+                    null,
+                    "upstream_error",
+                    StatusCodes.Status502BadGateway),
+                cancellationToken);
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "text/event-stream; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers["X-Accel-Buffering"] = "no";
+
+        try
+        {
+            if (hasFirst)
+            {
+                await WriteStreamRecordAsync(context.Response, enumerator.Current, cancellationToken);
+            }
+
+            while (await enumerator.MoveNextAsync())
+            {
+                await WriteStreamRecordAsync(context.Response, enumerator.Current, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Client disconnect is the cancellation mechanism for OpenAI SSE streams.
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or IOException or EndOfStreamException)
+        {
+            logger.LogWarning(
+                ex,
+                "OpenAI-compatible streaming operation {Operation} failed for model {Model}",
+                operation,
+                request["model"]);
+        }
+    }
+
     private static async Task ChatCompletionsAsync(
         HttpContext context,
         OpenAiCompatibilityService service,
@@ -66,8 +212,7 @@ public static class OpenAiCompatibilityEndpoints
         JsonObject request;
         try
         {
-            request = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: cancellationToken) as JsonObject
-                ?? throw new JsonException("Request body must be a JSON object.");
+            request = await ReadJsonObjectAsync(context, cancellationToken);
         }
         catch (JsonException)
         {
@@ -189,6 +334,26 @@ public static class OpenAiCompatibilityEndpoints
                 await context.Response.Body.FlushAsync(cancellationToken);
             }
         }
+    }
+
+    private static async Task<JsonObject> ReadJsonObjectAsync(
+        HttpContext context,
+        CancellationToken cancellationToken) =>
+        await JsonNode.ParseAsync(context.Request.Body, cancellationToken: cancellationToken) as JsonObject
+            ?? throw new JsonException("Request body must be a JSON object.");
+
+    private static async Task WriteStreamRecordAsync(
+        HttpResponse response,
+        OpenAiCompatibilityService.StreamRecord record,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(record.EventName))
+        {
+            await response.WriteAsync($"event: {record.EventName}\n", cancellationToken);
+        }
+
+        await response.WriteAsync($"data: {record.Data}\n\n", cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
     }
 
     private static async Task WriteChunkAsync(

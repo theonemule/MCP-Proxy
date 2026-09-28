@@ -10,14 +10,18 @@ using Microsoft.EntityFrameworkCore;
 namespace McpProxy.Models;
 
 /// <summary>
-/// Exposes the model gateway through the OpenAI v1 model and Chat Completions contracts while
-/// translating OpenAI requests to providers that do not natively implement that API.
+/// Exposes the model gateway through the OpenAI v1 API. Chat Completions can be translated to
+/// native providers, while other JSON model operations can pass through to OpenAI-compatible
+/// providers using the same public model aliases and authorization boundary.
 /// </summary>
 public sealed class OpenAiCompatibilityService(
     ProxyDbContext db,
     IPermissionService permissions,
     IHttpClientFactory httpClientFactory)
 {
+    /// <summary>One SSE record from a generic OpenAI-compatible streaming operation.</summary>
+    public sealed record StreamRecord(string? EventName, string Data);
+
     /// <summary>Returns the authorized model catalog in OpenAI's model-list shape.</summary>
     public async Task<JsonObject> ListModelsAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
@@ -56,6 +60,99 @@ public sealed class OpenAiCompatibilityService(
     {
         var route = await ResolveRouteAsync(user, publicModel, cancellationToken);
         return ModelObject(route.PublicName, route.CreatedAt, route.Provider.Slug);
+    }
+
+    /// <summary>
+    /// Forwards any JSON OpenAI v1 POST carrying a model field to a provider that implements
+    /// that OpenAI operation. This covers Responses, Embeddings, Completions, image-generation
+    /// style JSON operations, and future compatible endpoints without adding gateway schemas.
+    /// </summary>
+    public async Task<JsonObject> ForwardOpenAiOperationAsync(
+        ClaimsPrincipal user,
+        string operationPath,
+        JsonObject request,
+        CancellationToken cancellationToken)
+    {
+        var route = await ResolveOperationRouteAsync(user, request, cancellationToken);
+        var (uri, signForBedrock) = ResolveOpenAiOperation(route, operationPath);
+        var body = request.DeepClone().AsObject();
+        body["model"] = route.DownstreamModel;
+
+        var response = await SendJsonAsync(
+            route.Provider,
+            uri,
+            body,
+            signForBedrock,
+            cancellationToken);
+
+        RewriteModelIdentity(response, route.DownstreamModel, route.PublicName);
+        return response;
+    }
+
+    /// <summary>
+    /// Streams a generic OpenAI v1 operation while preserving event names and data records.
+    /// Model identities are rewritten recursively so private downstream IDs do not leak.
+    /// </summary>
+    public async IAsyncEnumerable<StreamRecord> StreamOpenAiOperationAsync(
+        ClaimsPrincipal user,
+        string operationPath,
+        JsonObject request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var route = await ResolveOperationRouteAsync(user, request, cancellationToken);
+        var (uri, signForBedrock) = ResolveOpenAiOperation(route, operationPath);
+        var body = request.DeepClone().AsObject();
+        body["model"] = route.DownstreamModel;
+        body["stream"] = true;
+
+        using var response = await SendResponseAsync(
+            route.Provider,
+            uri,
+            body,
+            signForBedrock,
+            cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8, false, leaveOpen: true);
+
+        string? eventName = null;
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+            {
+                eventName = line[6..].Trim();
+                continue;
+            }
+
+            if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var data = line[5..].TrimStart();
+            if (data == "[DONE]")
+            {
+                yield return new StreamRecord(eventName, data);
+                eventName = null;
+                continue;
+            }
+
+            try
+            {
+                var node = JsonNode.Parse(data);
+                if (node is not null)
+                {
+                    RewriteModelIdentity(node, route.DownstreamModel, route.PublicName);
+                    data = node.ToJsonString();
+                }
+            }
+            catch (JsonException)
+            {
+                // Preserve non-JSON SSE data verbatim for forward compatibility.
+            }
+
+            yield return new StreamRecord(eventName, data);
+            eventName = null;
+        }
     }
 
     /// <summary>Creates one non-streaming OpenAI Chat Completion against any configured provider.</summary>
@@ -462,6 +559,24 @@ public sealed class OpenAiCompatibilityService(
         {
             yield return UsageChunk(route.PublicName, id, created, usage);
         }
+    }
+
+    private async Task<ModelRoute> ResolveOperationRouteAsync(
+        ClaimsPrincipal user,
+        JsonObject request,
+        CancellationToken cancellationToken)
+    {
+        var model = request["model"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            throw new OpenAiCompatibilityException(
+                "invalid_request_error",
+                "You must provide a model.",
+                "model",
+                null);
+        }
+
+        return await ResolveRouteAsync(user, model, cancellationToken);
     }
 
     private async Task<(ModelRoute Route, JsonArray Messages)> ValidateAndResolveAsync(
@@ -1031,6 +1146,101 @@ public sealed class OpenAiCompatibilityService(
         }
     }
 
+    private (Uri Uri, bool SignForBedrock) ResolveOpenAiOperation(ModelRoute route, string operationPath)
+    {
+        var normalized = operationPath.Trim('/');
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            normalized.Equals("models", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new OpenAiCompatibilityException(
+                "invalid_request_error",
+                "This OpenAI operation is not available through model inference routing.",
+                null,
+                "unsupported_operation",
+                StatusCodes.Status404NotFound);
+        }
+
+        return route.Provider.Kind switch
+        {
+            ModelProviderKind.OpenAiCompatible =>
+                (BuildOpenAiOperationUri(route.Provider, normalized, bedrockRuntime: false), false),
+            ModelProviderKind.AwsBedrock =>
+                (BuildOpenAiOperationUri(route.Provider, normalized, bedrockRuntime: true), true),
+            _ => throw new OpenAiCompatibilityException(
+                "invalid_request_error",
+                $"Model '{route.PublicName}' is not backed by a provider that exposes this OpenAI v1 operation.",
+                "model",
+                "unsupported_model_provider")
+        };
+    }
+
+    private static Uri BuildOpenAiOperationUri(
+        ModelProvider provider,
+        string operationPath,
+        bool bedrockRuntime)
+    {
+        var endpoint = provider.BaseEndpoint;
+        if (bedrockRuntime && string.IsNullOrWhiteSpace(endpoint))
+        {
+            endpoint = $"https://bedrock-runtime.{ModelCredentialResolver.ResolveAwsRegion(provider)}.amazonaws.com";
+        }
+
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var baseUri) ||
+            (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException($"Model provider '{provider.Name}' has an invalid base endpoint.");
+        }
+
+        var root = baseUri.ToString().TrimEnd('/');
+        var basePath = baseUri.AbsolutePath.TrimEnd('/');
+        var suffix = "/" + operationPath.TrimStart('/');
+
+        if (basePath.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Uri(root + suffix, UriKind.Absolute);
+        }
+
+        return new Uri(
+            root + (bedrockRuntime ? "/openai/v1" : "/v1") + suffix,
+            UriKind.Absolute);
+    }
+
+    private static void RewriteModelIdentity(JsonNode node, string downstreamModel, string publicModel)
+    {
+        if (node is JsonObject obj)
+        {
+            foreach (var pair in obj.ToList())
+            {
+                if (pair.Key.Equals("model", StringComparison.OrdinalIgnoreCase) &&
+                    pair.Value is JsonValue value &&
+                    value.TryGetValue<string>(out var model) &&
+                    model == downstreamModel)
+                {
+                    obj[pair.Key] = publicModel;
+                    continue;
+                }
+
+                if (pair.Value is not null)
+                {
+                    RewriteModelIdentity(pair.Value, downstreamModel, publicModel);
+                }
+            }
+            return;
+        }
+
+        if (node is JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                if (item is not null)
+                {
+                    RewriteModelIdentity(item, downstreamModel, publicModel);
+                }
+            }
+        }
+    }
+
     private static Uri BuildOpenAiChatUri(ModelProvider provider)
     {
         if (!string.IsNullOrWhiteSpace(provider.ChatPath))
@@ -1038,17 +1248,7 @@ public sealed class OpenAiCompatibilityService(
             return ModelRouterService.BuildProviderUri(provider, provider.ChatPath!);
         }
 
-        if (!Uri.TryCreate(provider.BaseEndpoint, UriKind.Absolute, out var baseUri))
-        {
-            throw new InvalidOperationException($"Model provider '{provider.Name}' has an invalid base endpoint.");
-        }
-
-        var path = baseUri.AbsolutePath.TrimEnd('/');
-        return ModelRouterService.BuildProviderUri(
-            provider,
-            path.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
-                ? "/chat/completions"
-                : "/v1/chat/completions");
+        return BuildOpenAiOperationUri(provider, "chat/completions", bedrockRuntime: false);
     }
 
     private static Uri BuildBedrockUri(ModelRoute route, bool streaming)

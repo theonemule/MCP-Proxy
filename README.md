@@ -1192,11 +1192,15 @@ The primary model API is:
 GET  /v1/models
 GET  /v1/models/{model}
 POST /v1/chat/completions
+POST /v1/responses
+POST /v1/{other-json-model-operation}
 ```
 
 `GET /v1/models` returns only model aliases visible to the authenticated caller and uses the OpenAI model-list contract. Each public alias is returned as an OpenAI model ID, so applications never need to know the provider-native deployment or model identifier.
 
 `POST /v1/chat/completions` accepts the OpenAI Chat Completions request shape, including `messages`, `stream`, `stream_options`, sampling parameters, function tools, tool choice, and provider-specific optional fields when the downstream provider is itself OpenAI-compatible.
+
+Other JSON OpenAI v1 model operations use the same `/v1` namespace. `POST /v1/responses` works for providers exposing Responses, and the catch-all POST route forwards newer OpenAI-compatible JSON model operations without introducing a gateway-specific request schema. These requests must include a `model` field so the gateway can apply RBAC and map the public alias to the downstream model ID.
 
 ### 20.1 OpenAI SDK usage
 
@@ -1268,9 +1272,12 @@ Supported provider modes are:
 - **AWS Bedrock** using the Bedrock Converse and ConverseStream APIs with Bedrock API-key or SigV4 authentication. The result is exposed northbound as OpenAI Chat Completions. Bedrock deployments that expose an OpenAI-compatible endpoint can instead be registered as **OpenAI API compatible** when bearer API-key authentication is used.
 - **Generic HTTP** for native pass-through when no OpenAI inference adapter is required.
 
-For an OpenAI-compatible downstream provider, the request body is preserved rather than reduced to a gateway-specific subset. The gateway replaces the public `model` alias with the provider-native model identifier, applies the provider credential, forwards the request, and rewrites the returned model identity back to the public alias.
+For an OpenAI-compatible downstream provider, the request body is preserved rather than reduced to a gateway-specific subset. The gateway replaces the public `model` alias with the provider-native model identifier, applies the provider credential, forwards the request, and recursively rewrites returned model identities back to the public alias.
+
+The generic path covers JSON OpenAI v1 operations such as Responses, Embeddings, legacy Completions, and future compatible POST endpoints. Streaming SSE event names are preserved, and JSON data payloads are rewritten only where they expose the private downstream model ID.
 
 A base URL that already ends in `/v1`, including paths such as `/openai/v1`, is handled without duplicating the version segment.
+For the native AWS Bedrock provider, generic OpenAI-v1 operations are sent to the Bedrock Runtime `/openai/v1` surface and can use a Bedrock bearer API key or SigV4.
 
 ### 20.4 Models and authorization
 
@@ -1337,7 +1344,7 @@ POST /models/chat
 POST /models/chat/stream
 ```
 
-New integrations should use `/v1/models` and `/v1/chat/completions`. The `/v1` surface is the model convergence contract going forward.
+New integrations should use the `/v1` surface. Chat clients can use `/v1/chat/completions`, while agentic clients can use `/v1/responses` when the selected provider supports it. The `/v1` namespace is the model convergence contract going forward.
 
 ### 20.9 Example provider setup
 
@@ -1345,6 +1352,6 @@ For Hugging Face Inference Providers, register an **OpenAI API compatible** prov
 
 For Microsoft Foundry v1, register an **OpenAI API compatible** provider with the Foundry `/openai/v1` base URL and the credential required by the deployment.
 
-For local Ollama, register an **Ollama** provider with base endpoint `http://ollama:11434` and no credential. OpenAI clients still connect only to the gateway `/v1` URL.
+For local Ollama, either register **OpenAI API compatible** against Ollama's `/v1` surface for direct OpenAI endpoint behavior, or use the **Ollama** provider type to retain the native `/api/chat` adapter. OpenAI clients still connect only to the gateway `/v1` URL.
 
 For AWS Bedrock, use the **AWS Bedrock** provider type when the gateway should adapt Converse/ConverseStream or use SigV4. If the selected Bedrock model supports Bedrock's OpenAI-compatible Chat Completions endpoint and a Bedrock bearer API key is available, it may instead be registered as **OpenAI API compatible**.
