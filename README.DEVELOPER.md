@@ -312,10 +312,19 @@ The model gateway is parallel to the MCP transport and reuses the same authentic
 The durable entities remain:
 
 - `ModelProvider`, which stores provider protocol, endpoint, and environment-backed credential references.
-- `ModelRoute`, which maps a public OpenAI model ID to one provider-native model identifier.
-- `ModelPermission`, which grants a role either provider-wide access or access to one model route.
+- `ModelRoute`, which defines a stable public OpenAI model ID and retains its original provider/model pair as the implicit primary target.
+- `ModelRouteTarget`, which adds another provider/model target with a priority tier, weight, enabled state, and creation time.
+- `ModelPermission`, which grants a role either provider-wide access or access to one logical model route.
 
-`PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls OpenAI-compatible inference. Provider-wide access implies all routes on that provider; route access does not imply native provider access.
+`PermissionService` is the authorization boundary. `CanAccessModelProviderAsync` controls native pass-through. `CanAccessModelRouteAsync` controls visibility/use of the logical alias. `CanAccessModelRouteTargetAsync` prevents provider-only grants from silently crossing into an ungranted secondary provider. A direct route grant authorizes all internal targets for that alias; route access still does not imply native provider access.
+
+### Routing policy
+
+`ModelRouteSelector` expands a logical route into compatible candidates for either Chat Completions or generic OpenAI-v1 operations. The route's original provider/model pair is synthesized as priority `0`, weight `100`. Rows from `ModelRouteTargets` are then added as configured. Disabled providers and targets are removed, and providers without the required protocol capability are skipped.
+
+Targets at the same priority are selected using smooth weighted round-robin from singleton `ModelRoutingState`. Higher priority numbers are failover tiers. The same state tracks consecutive downstream failures by provider/model key. After three failures, a target circuit is open for 30 seconds. State is intentionally process-local in this implementation, so multi-node deployments do not share circuit state.
+
+`OpenAiCompatibilityService` retries only failures that are safe candidates for routing failover: HTTP `408`, `409`, `425`, `429`, `5xx`, network failures, timeout failures not caused by caller cancellation, and invalid downstream payloads. OpenAI validation/authorization errors and downstream `400`/`401`/`403`/`404` responses are not retried across providers. Streaming failover is permitted only before the first emitted chunk/event.
 
 ### OpenAI v1 compatibility layer
 
@@ -402,6 +411,8 @@ Administration remains provider/route based:
 - `PUT/DELETE /admin/model-providers/{id}`
 - `GET/POST /admin/model-routes`
 - `PUT/DELETE /admin/model-routes/{id}`
+- `GET/POST /admin/model-route-targets`
+- `PUT/DELETE /admin/model-route-targets/{id}`
 - `GET/POST /admin/model-permissions`
 - `DELETE /admin/model-permissions/{id}`
 

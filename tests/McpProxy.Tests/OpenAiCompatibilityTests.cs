@@ -344,6 +344,106 @@ public sealed class OpenAiCompatibilityTests
         Assert.False(ApiKeyGenerator.TryGetBearerApiKey("Basic abc", out _));
     }
 
+    [Fact]
+    public async Task Routed_chat_fails_over_to_higher_priority_target_on_transient_provider_error()
+    {
+        var handler = new FailoverOpenAiHandler();
+        var fixture = await CreateAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://primary.example/v1",
+            handler);
+
+        var route = await fixture.Db.ModelRoutes.SingleAsync();
+        var backup = new ModelProvider
+        {
+            Name = "Backup",
+            Slug = "backup",
+            Kind = ModelProviderKind.OpenAiCompatible,
+            BaseEndpoint = "https://backup.example/v1"
+        };
+        fixture.Db.Add(backup);
+        fixture.Db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "backup-model",
+            Priority = 100,
+            Weight = 100
+        });
+        await fixture.Db.SaveChangesAsync();
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "model":"public-model",
+              "messages":[{"role":"user","content":"Hello"}]
+            }
+            """)!.AsObject();
+
+        var response = await fixture.Service.CreateChatCompletionAsync(
+            fixture.Principal,
+            request,
+            default);
+
+        Assert.Equal("public-model", response["model"]?.GetValue<string>());
+        Assert.Equal("Hello from backup", response["choices"]?[0]?["message"]?["content"]?.GetValue<string>());
+        Assert.Equal(["primary.example", "backup.example"], handler.Hosts);
+    }
+
+    [Fact]
+    public async Task Routed_stream_fails_over_only_before_first_chunk()
+    {
+        var handler = new FailoverOpenAiHandler(streaming: true);
+        var fixture = await CreateAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://primary.example/v1",
+            handler);
+
+        var route = await fixture.Db.ModelRoutes.SingleAsync();
+        var backup = new ModelProvider
+        {
+            Name = "Backup",
+            Slug = "backup",
+            Kind = ModelProviderKind.OpenAiCompatible,
+            BaseEndpoint = "https://backup.example/v1"
+        };
+        fixture.Db.Add(backup);
+        fixture.Db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "backup-model",
+            Priority = 100,
+            Weight = 100
+        });
+        await fixture.Db.SaveChangesAsync();
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "model":"public-model",
+              "messages":[{"role":"user","content":"Hello"}],
+              "stream":true
+            }
+            """)!.AsObject();
+
+        var chunks = new List<JsonObject>();
+        await foreach (var chunk in fixture.Service.StreamChatCompletionAsync(
+                           fixture.Principal,
+                           request,
+                           default))
+        {
+            chunks.Add(chunk);
+        }
+
+        Assert.NotEmpty(chunks);
+        Assert.Equal("public-model", chunks[0]["model"]?.GetValue<string>());
+        Assert.Equal("backup", chunks[0]["choices"]?[0]?["delta"]?["content"]?.GetValue<string>());
+        Assert.Equal(["primary.example", "backup.example"], handler.Hosts);
+    }
+
     private static async Task<Fixture> CreateAsync(
         ModelProviderKind kind,
         string baseEndpoint,
@@ -389,15 +489,75 @@ public sealed class OpenAiCompatibilityTests
             new Claim(ProxyClaimTypes.PrincipalId, user.Id.ToString())
         ], "Test"));
 
+        var routingState = new ModelRoutingState();
+        var routeSelector = new ModelRouteSelector(db, routingState);
         var service = new OpenAiCompatibilityService(
             db,
             new PermissionService(db),
-            new ClientFactory(new HttpClient(handler)));
+            new ClientFactory(new HttpClient(handler)),
+            routeSelector,
+            routingState);
 
-        return new Fixture(service, principal);
+        return new Fixture(service, principal, db, routingState);
     }
 
-    private sealed record Fixture(OpenAiCompatibilityService Service, ClaimsPrincipal Principal);
+    private sealed record Fixture(
+        OpenAiCompatibilityService Service,
+        ClaimsPrincipal Principal,
+        ProxyDbContext Db,
+        ModelRoutingState RoutingState);
+
+    private sealed class FailoverOpenAiHandler(bool streaming = false) : HttpMessageHandler
+    {
+        public List<string> Hosts { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var host = request.RequestUri!.Host;
+            Hosts.Add(host);
+
+            if (host == "primary.example")
+            {
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                {
+                    ReasonPhrase = "Primary unavailable",
+                    Content = new StringContent("""{"error":{"message":"unavailable"}}""", Encoding.UTF8, "application/json")
+                };
+            }
+
+            if (streaming)
+            {
+                var sse =
+                    "data: {\"id\":\"chatcmpl-backup\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"backup-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"backup\"},\"finish_reason\":null}]}\n\n" +
+                    "data: [DONE]\n\n";
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+                };
+            }
+
+            await Task.Yield();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    {
+                      "id":"chatcmpl-backup",
+                      "object":"chat.completion",
+                      "created":1,
+                      "model":"backup-model",
+                      "choices":[
+                        {"index":0,"message":{"role":"assistant","content":"Hello from backup"},"finish_reason":"stop"}
+                      ]
+                    }
+                    """,
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+    }
 
     private sealed class ClientFactory(HttpClient client) : IHttpClientFactory
     {

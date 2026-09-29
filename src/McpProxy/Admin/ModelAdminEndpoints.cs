@@ -28,6 +28,15 @@ public sealed record CreateModelRouteRequest(
     string DownstreamModel,
     bool Enabled = true);
 
+/// <summary>Request to add or replace one weighted/failover target behind a public route.</summary>
+public sealed record CreateModelRouteTargetRequest(
+    Guid ModelRouteId,
+    Guid ProviderId,
+    string DownstreamModel,
+    int Priority = 100,
+    int Weight = 100,
+    bool Enabled = true);
+
 /// <summary>Request to grant a role access to a provider or model route.</summary>
 public sealed record CreateModelPermissionRequest(
     Guid RoleId,
@@ -46,6 +55,7 @@ public static partial class ModelAdminEndpoints
     {
         MapProviders(admin.MapGroup("/model-providers").RequireAdminScope(AdminScope.ServerAdmin));
         MapRoutes(admin.MapGroup("/model-routes").RequireAdminScope(AdminScope.ServerAdmin));
+        MapRouteTargets(admin.MapGroup("/model-route-targets").RequireAdminScope(AdminScope.ServerAdmin));
         MapPermissions(admin.MapGroup("/model-permissions").RequireAdminScope(AdminScope.UserAdmin));
     }
 
@@ -138,6 +148,9 @@ public static partial class ModelAdminEndpoints
             await db.ModelPermissions
                 .Where(x => x.ProviderId == id || (x.ModelRouteId != null && routeIds.Contains(x.ModelRouteId.Value)))
                 .ExecuteDeleteAsync();
+            await db.ModelRouteTargets
+                .Where(x => x.ProviderId == id || routeIds.Contains(x.ModelRouteId))
+                .ExecuteDeleteAsync();
             await db.ModelRoutes.Where(x => x.ProviderId == id).ExecuteDeleteAsync();
             await db.ModelProviders.Where(x => x.Id == id).ExecuteDeleteAsync();
             return Results.NoContent();
@@ -198,6 +211,76 @@ public static partial class ModelAdminEndpoints
         routes.MapDelete("/{id:guid}", async (Guid id, ProxyDbContext db) =>
         {
             var affected = await db.ModelRoutes.Where(x => x.Id == id).ExecuteDeleteAsync();
+            return affected > 0 ? Results.NoContent() : Results.NotFound();
+        });
+    }
+
+    private static void MapRouteTargets(RouteGroupBuilder targets)
+    {
+        targets.MapGet("/", async (ProxyDbContext db) =>
+            Results.Ok(await db.ModelRouteTargets.AsNoTracking()
+                .OrderBy(x => x.ModelRoute.PublicName)
+                .ThenBy(x => x.Priority)
+                .ThenBy(x => x.Provider.Name)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.ModelRouteId,
+                    ModelName = x.ModelRoute.PublicName,
+                    x.ProviderId,
+                    ProviderName = x.Provider.Name,
+                    ProviderSlug = x.Provider.Slug,
+                    ProviderKind = x.Provider.Kind,
+                    x.DownstreamModel,
+                    x.Priority,
+                    x.Weight,
+                    x.Enabled
+                })
+                .ToListAsync()));
+
+        targets.MapPost("/", async (CreateModelRouteTargetRequest request, ProxyDbContext db) =>
+        {
+            var validation = await ValidateRouteTargetAsync(request, null, db);
+            if (validation is not null) return validation;
+
+            var target = new ModelRouteTarget
+            {
+                ModelRouteId = request.ModelRouteId,
+                ProviderId = request.ProviderId,
+                DownstreamModel = request.DownstreamModel.Trim(),
+                Priority = request.Priority,
+                Weight = request.Weight,
+                Enabled = request.Enabled
+            };
+            db.ModelRouteTargets.Add(target);
+            await db.SaveChangesAsync();
+            return Results.Created($"/admin/model-route-targets/{target.Id}", new { target.Id });
+        });
+
+        targets.MapPut("/{id:guid}", async (
+            Guid id,
+            CreateModelRouteTargetRequest request,
+            ProxyDbContext db) =>
+        {
+            var target = await db.ModelRouteTargets.SingleOrDefaultAsync(x => x.Id == id);
+            if (target is null) return Results.NotFound();
+
+            var validation = await ValidateRouteTargetAsync(request, id, db);
+            if (validation is not null) return validation;
+
+            target.ModelRouteId = request.ModelRouteId;
+            target.ProviderId = request.ProviderId;
+            target.DownstreamModel = request.DownstreamModel.Trim();
+            target.Priority = request.Priority;
+            target.Weight = request.Weight;
+            target.Enabled = request.Enabled;
+            await db.SaveChangesAsync();
+            return Results.NoContent();
+        });
+
+        targets.MapDelete("/{id:guid}", async (Guid id, ProxyDbContext db) =>
+        {
+            var affected = await db.ModelRouteTargets.Where(x => x.Id == id).ExecuteDeleteAsync();
             return affected > 0 ? Results.NoContent() : Results.NotFound();
         });
     }
@@ -340,6 +423,57 @@ public static partial class ModelAdminEndpoints
         if (await db.ModelRoutes.AnyAsync(x => x.PublicName == request.PublicName.Trim() && x.Id != existingId))
         {
             return Results.Conflict("Public model name already exists.");
+        }
+
+        return null;
+    }
+
+    private static async Task<IResult?> ValidateRouteTargetAsync(
+        CreateModelRouteTargetRequest request,
+        Guid? existingId,
+        ProxyDbContext db)
+    {
+        if (!await db.ModelRoutes.AnyAsync(x => x.Id == request.ModelRouteId))
+        {
+            return Results.BadRequest("ModelRouteId must identify an existing public model route.");
+        }
+
+        if (!await db.ModelProviders.AnyAsync(x => x.Id == request.ProviderId))
+        {
+            return Results.BadRequest("ProviderId must identify an existing provider.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.DownstreamModel))
+        {
+            return Results.BadRequest("DownstreamModel is required.");
+        }
+
+        if (request.Priority is < 0 or > 100000)
+        {
+            return Results.BadRequest("Priority must be between 0 and 100000.");
+        }
+
+        if (request.Weight is < 1 or > 10000)
+        {
+            return Results.BadRequest("Weight must be between 1 and 10000.");
+        }
+
+        var downstream = request.DownstreamModel.Trim();
+        if (await db.ModelRouteTargets.AnyAsync(x =>
+                x.ModelRouteId == request.ModelRouteId &&
+                x.ProviderId == request.ProviderId &&
+                x.DownstreamModel == downstream &&
+                x.Id != existingId))
+        {
+            return Results.Conflict("That provider/model target is already configured for this route.");
+        }
+
+        var route = await db.ModelRoutes.AsNoTracking()
+            .SingleAsync(x => x.Id == request.ModelRouteId);
+        if (route.ProviderId == request.ProviderId &&
+            route.DownstreamModel == downstream)
+        {
+            return Results.Conflict("That provider/model pair is already the route's implicit primary target.");
         }
 
         return null;

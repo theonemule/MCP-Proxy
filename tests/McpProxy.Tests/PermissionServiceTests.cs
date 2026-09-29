@@ -166,4 +166,47 @@ public class PermissionServiceTests
 
         Assert.True(await permissions.CanAccessAsync(principal, server.Id, CapabilityKind.Tool, "any-tool", default));
     }
+    [Fact]
+    public async Task Provider_only_route_access_does_not_authorize_ungranted_cross_provider_target()
+    {
+        await using var db = CreateDb();
+        var primary = new ModelProvider { Name = "Primary", Slug = "primary", Kind = ModelProviderKind.OpenAiCompatible, BaseEndpoint = "https://primary.example/v1" };
+        var backup = new ModelProvider { Name = "Backup", Slug = "backup", Kind = ModelProviderKind.OpenAiCompatible, BaseEndpoint = "https://backup.example/v1" };
+        var route = new ModelRoute { ProviderId = primary.Id, Provider = primary, PublicName = "logical", DownstreamModel = "primary-model" };
+        var role = new Role { Name = "Primary users" };
+        var user = new User { Username = "router-user", PasswordHash = "x" };
+        db.AddRange(primary, backup, route, role, user);
+        db.Add(new UserRole { UserId = user.Id, RoleId = role.Id });
+        db.Add(new ModelPermission { RoleId = role.Id, Scope = ModelPermissionScope.Provider, ProviderId = primary.Id });
+        await db.SaveChangesAsync();
+
+        var permissions = new PermissionService(db);
+        var principal = PrincipalFor("user", user.Id);
+
+        Assert.True(await permissions.CanAccessModelRouteAsync(principal, route.Id, default));
+        Assert.True(await permissions.CanAccessModelRouteTargetAsync(principal, route.Id, primary.Id, default));
+        Assert.False(await permissions.CanAccessModelRouteTargetAsync(principal, route.Id, backup.Id, default));
+    }
+
+    [Fact]
+    public async Task Direct_route_grant_authorizes_internal_cross_provider_targets()
+    {
+        await using var db = CreateDb();
+        var primary = new ModelProvider { Name = "Primary", Slug = "primary", Kind = ModelProviderKind.OpenAiCompatible, BaseEndpoint = "https://primary.example/v1" };
+        var backup = new ModelProvider { Name = "Backup", Slug = "backup", Kind = ModelProviderKind.OpenAiCompatible, BaseEndpoint = "https://backup.example/v1" };
+        var route = new ModelRoute { ProviderId = primary.Id, Provider = primary, PublicName = "logical", DownstreamModel = "primary-model" };
+        var role = new Role { Name = "Logical route users" };
+        var user = new User { Username = "route-user", PasswordHash = "x" };
+        db.AddRange(primary, backup, route, role, user);
+        db.Add(new UserRole { UserId = user.Id, RoleId = role.Id });
+        db.Add(new ModelPermission { RoleId = role.Id, Scope = ModelPermissionScope.Route, ModelRouteId = route.Id });
+        await db.SaveChangesAsync();
+
+        var permissions = new PermissionService(db);
+        var principal = PrincipalFor("user", user.Id);
+
+        Assert.True(await permissions.CanAccessModelRouteTargetAsync(principal, route.Id, primary.Id, default));
+        Assert.True(await permissions.CanAccessModelRouteTargetAsync(principal, route.Id, backup.Id, default));
+    }
+
 }

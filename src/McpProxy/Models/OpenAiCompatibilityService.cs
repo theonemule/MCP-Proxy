@@ -17,7 +17,9 @@ namespace McpProxy.Models;
 public sealed class OpenAiCompatibilityService(
     ProxyDbContext db,
     IPermissionService permissions,
-    IHttpClientFactory httpClientFactory)
+    IHttpClientFactory httpClientFactory,
+    ModelRouteSelector routeSelector,
+    ModelRoutingState routingState)
 {
     /// <summary>One SSE record from a generic OpenAI-compatible streaming operation.</summary>
     public sealed record StreamRecord(string? EventName, string Data);
@@ -29,7 +31,10 @@ public sealed class OpenAiCompatibilityService(
         var rows = accessible.Count == 0
             ? []
             : await db.ModelRoutes.AsNoTracking()
-                .Where(x => x.Enabled && x.Provider.Enabled && accessible.Contains(x.Id))
+                .Where(x =>
+                    x.Enabled &&
+                    accessible.Contains(x.Id) &&
+                    (x.Provider.Enabled || x.Targets.Any(t => t.Enabled && t.Provider.Enabled)))
                 .OrderBy(x => x.PublicName)
                 .Select(x => new
                 {
@@ -63,9 +68,8 @@ public sealed class OpenAiCompatibilityService(
     }
 
     /// <summary>
-    /// Forwards any JSON OpenAI v1 POST carrying a model field to a provider that implements
-    /// that OpenAI operation. This covers Responses, Embeddings, Completions, image-generation
-    /// style JSON operations, and future compatible endpoints without adding gateway schemas.
+    /// Forwards any JSON OpenAI v1 POST carrying a model field to a compatible routed target.
+    /// Healthy equal-priority targets share traffic by weight and higher priorities are failover tiers.
     /// </summary>
     public async Task<JsonObject> ForwardOpenAiOperationAsync(
         ClaimsPrincipal user,
@@ -73,7 +77,19 @@ public sealed class OpenAiCompatibilityService(
         JsonObject request,
         CancellationToken cancellationToken)
     {
-        var route = await ResolveOperationRouteAsync(user, request, cancellationToken);
+        var routes = await ResolveOperationRoutesAsync(user, request, cancellationToken);
+        return await ExecuteWithFailoverAsync(
+            routes,
+            route => ForwardOpenAiOperationOnRouteAsync(route, operationPath, request, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<JsonObject> ForwardOpenAiOperationOnRouteAsync(
+        ModelRoute route,
+        string operationPath,
+        JsonObject request,
+        CancellationToken cancellationToken)
+    {
         var (uri, signForBedrock) = ResolveOpenAiOperation(route, operationPath);
         var body = request.DeepClone().AsObject();
         body["model"] = route.DownstreamModel;
@@ -90,8 +106,8 @@ public sealed class OpenAiCompatibilityService(
     }
 
     /// <summary>
-    /// Streams a generic OpenAI v1 operation while preserving event names and data records.
-    /// Model identities are rewritten recursively so private downstream IDs do not leak.
+    /// Streams a generic OpenAI v1 operation. Failover is allowed only until the first downstream
+    /// event is emitted so one caller stream is never stitched together from multiple providers.
     /// </summary>
     public async IAsyncEnumerable<StreamRecord> StreamOpenAiOperationAsync(
         ClaimsPrincipal user,
@@ -99,7 +115,22 @@ public sealed class OpenAiCompatibilityService(
         JsonObject request,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var route = await ResolveOperationRouteAsync(user, request, cancellationToken);
+        var routes = await ResolveOperationRoutesAsync(user, request, cancellationToken);
+        await foreach (var record in RouteStreamWithFailover(
+                           routes,
+                           route => StreamOpenAiOperationOnRouteAsync(route, operationPath, request, cancellationToken),
+                           cancellationToken))
+        {
+            yield return record;
+        }
+    }
+
+    private async IAsyncEnumerable<StreamRecord> StreamOpenAiOperationOnRouteAsync(
+        ModelRoute route,
+        string operationPath,
+        JsonObject request,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         var (uri, signForBedrock) = ResolveOpenAiOperation(route, operationPath);
         var body = request.DeepClone().AsObject();
         body["model"] = route.DownstreamModel;
@@ -155,73 +186,178 @@ public sealed class OpenAiCompatibilityService(
         }
     }
 
-    /// <summary>Creates one non-streaming OpenAI Chat Completion against any configured provider.</summary>
+    /// <summary>Creates one non-streaming OpenAI Chat Completion using the route's target policy.</summary>
     public async Task<JsonObject> CreateChatCompletionAsync(
         ClaimsPrincipal user,
         JsonObject request,
         CancellationToken cancellationToken)
     {
-        var (route, messages) = await ValidateAndResolveAsync(user, request, cancellationToken);
-
-        return route.Provider.Kind switch
-        {
-            ModelProviderKind.OpenAiCompatible =>
-                await CreateNativeOpenAiCompletionAsync(route, request, cancellationToken),
-            ModelProviderKind.Ollama =>
-                await CreateOllamaCompletionAsync(route, request, messages, cancellationToken),
-            ModelProviderKind.AwsBedrock =>
-                await CreateBedrockCompletionAsync(route, request, messages, cancellationToken),
-            ModelProviderKind.GenericHttp => throw new OpenAiCompatibilityException(
-                "invalid_request_error",
-                $"Model '{route.PublicName}' is not configured with an OpenAI-compatible inference adapter.",
-                "model",
-                "unsupported_model_provider"),
-            _ => throw new InvalidOperationException($"Unsupported model provider kind '{route.Provider.Kind}'.")
-        };
+        var (routes, messages) = await ValidateAndResolveAsync(user, request, cancellationToken);
+        return await ExecuteWithFailoverAsync(
+            routes,
+            route => CreateChatCompletionOnRouteAsync(route, request, messages, cancellationToken),
+            cancellationToken);
     }
 
-    /// <summary>Streams OpenAI Chat Completion chunks against any configured provider.</summary>
+    private Task<JsonObject> CreateChatCompletionOnRouteAsync(
+        ModelRoute route,
+        JsonObject request,
+        JsonArray messages,
+        CancellationToken cancellationToken) =>
+        route.Provider.Kind switch
+        {
+            ModelProviderKind.OpenAiCompatible =>
+                CreateNativeOpenAiCompletionAsync(route, request, cancellationToken),
+            ModelProviderKind.Ollama =>
+                CreateOllamaCompletionAsync(route, request, messages, cancellationToken),
+            ModelProviderKind.AwsBedrock =>
+                CreateBedrockCompletionAsync(route, request, messages, cancellationToken),
+            _ => Task.FromException<JsonObject>(NoCompatibleTargets(route.PublicName))
+        };
+
+    /// <summary>Streams Chat Completions with pre-first-chunk failover across routed targets.</summary>
     public async IAsyncEnumerable<JsonObject> StreamChatCompletionAsync(
         ClaimsPrincipal user,
         JsonObject request,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var (route, messages) = await ValidateAndResolveAsync(user, request, cancellationToken);
-
-        switch (route.Provider.Kind)
+        var (routes, messages) = await ValidateAndResolveAsync(user, request, cancellationToken);
+        await foreach (var chunk in RouteStreamWithFailover(
+                           routes,
+                           route => StreamChatCompletionOnRouteAsync(route, request, messages, cancellationToken),
+                           cancellationToken))
         {
-            case ModelProviderKind.OpenAiCompatible:
-                await foreach (var chunk in StreamNativeOpenAiAsync(route, request, cancellationToken))
-                {
-                    yield return chunk;
-                }
-                break;
-
-            case ModelProviderKind.Ollama:
-                await foreach (var chunk in StreamOllamaAsync(route, request, messages, cancellationToken))
-                {
-                    yield return chunk;
-                }
-                break;
-
-            case ModelProviderKind.AwsBedrock:
-                await foreach (var chunk in StreamBedrockAsync(route, request, messages, cancellationToken))
-                {
-                    yield return chunk;
-                }
-                break;
-
-            case ModelProviderKind.GenericHttp:
-                throw new OpenAiCompatibilityException(
-                    "invalid_request_error",
-                    $"Model '{route.PublicName}' is not configured with an OpenAI-compatible inference adapter.",
-                    "model",
-                    "unsupported_model_provider");
-
-            default:
-                throw new InvalidOperationException($"Unsupported model provider kind '{route.Provider.Kind}'.");
+            yield return chunk;
         }
     }
+
+    private IAsyncEnumerable<JsonObject> StreamChatCompletionOnRouteAsync(
+        ModelRoute route,
+        JsonObject request,
+        JsonArray messages,
+        CancellationToken cancellationToken) =>
+        route.Provider.Kind switch
+        {
+            ModelProviderKind.OpenAiCompatible => StreamNativeOpenAiAsync(route, request, cancellationToken),
+            ModelProviderKind.Ollama => StreamOllamaAsync(route, request, messages, cancellationToken),
+            ModelProviderKind.AwsBedrock => StreamBedrockAsync(route, request, messages, cancellationToken),
+            _ => ThrowUnsupportedStream(route.PublicName)
+        };
+
+    private static async IAsyncEnumerable<JsonObject> ThrowUnsupportedStream(
+        string publicModel)
+    {
+        await Task.Yield();
+        throw NoCompatibleTargets(publicModel);
+#pragma warning disable CS0162
+        yield break;
+#pragma warning restore CS0162
+    }
+
+    private async Task<JsonObject> ExecuteWithFailoverAsync(
+        IReadOnlyList<ModelRoute> routes,
+        Func<ModelRoute, Task<JsonObject>> execute,
+        CancellationToken cancellationToken)
+    {
+        if (routes.Count == 0)
+        {
+            throw NoCompatibleTargets("requested");
+        }
+
+        Exception? lastFailure = null;
+        foreach (var route in routes)
+        {
+            try
+            {
+                var result = await execute(route);
+                routingState.RecordSuccess(route);
+                return result;
+            }
+            catch (Exception exception) when (IsRetryableRoutingFailure(exception, cancellationToken))
+            {
+                routingState.RecordFailure(route);
+                lastFailure = exception;
+            }
+        }
+
+        throw lastFailure ?? NoCompatibleTargets(routes[0].PublicName);
+    }
+
+    private async IAsyncEnumerable<T> RouteStreamWithFailover<T>(
+        IReadOnlyList<ModelRoute> routes,
+        Func<ModelRoute, IAsyncEnumerable<T>> streamFactory,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (routes.Count == 0)
+        {
+            throw NoCompatibleTargets("requested");
+        }
+
+        Exception? lastFailure = null;
+
+        foreach (var route in routes)
+        {
+            await using var enumerator = streamFactory(route).GetAsyncEnumerator(cancellationToken);
+            var emitted = false;
+
+            while (true)
+            {
+                bool hasNext;
+                try
+                {
+                    hasNext = await enumerator.MoveNextAsync();
+                }
+                catch (Exception exception) when (!emitted && IsRetryableRoutingFailure(exception, cancellationToken))
+                {
+                    routingState.RecordFailure(route);
+                    lastFailure = exception;
+                    break;
+                }
+
+                if (!hasNext)
+                {
+                    routingState.RecordSuccess(route);
+                    yield break;
+                }
+
+                if (!emitted)
+                {
+                    routingState.RecordSuccess(route);
+                    emitted = true;
+                }
+
+                yield return enumerator.Current;
+            }
+        }
+
+        throw lastFailure ?? NoCompatibleTargets(routes[0].PublicName);
+    }
+
+    private static bool IsRetryableRoutingFailure(Exception exception, CancellationToken cancellationToken)
+    {
+        if (exception is OperationCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        if (exception is OpenAiCompatibilityException)
+        {
+            return false;
+        }
+
+        if (exception is DownstreamModelException downstream)
+        {
+            return downstream.StatusCode is 408 or 409 or 425 or 429 || downstream.StatusCode >= 500;
+        }
+
+        return exception is HttpRequestException or InvalidOperationException or TaskCanceledException;
+    }
+
+    private static OpenAiCompatibilityException NoCompatibleTargets(string publicModel) => new(
+        "invalid_request_error",
+        $"Model '{publicModel}' has no enabled routing target compatible with this operation.",
+        "model",
+        "unsupported_model_provider");
 
     private async Task<JsonObject> CreateNativeOpenAiCompletionAsync(
         ModelRoute route,
@@ -561,7 +697,7 @@ public sealed class OpenAiCompatibilityService(
         }
     }
 
-    private async Task<ModelRoute> ResolveOperationRouteAsync(
+    private async Task<IReadOnlyList<ModelRoute>> ResolveOperationRoutesAsync(
         ClaimsPrincipal user,
         JsonObject request,
         CancellationToken cancellationToken)
@@ -576,10 +712,22 @@ public sealed class OpenAiCompatibilityService(
                 null);
         }
 
-        return await ResolveRouteAsync(user, model, cancellationToken);
+        var logical = await ResolveRouteAsync(user, model, cancellationToken);
+        var candidates = await routeSelector.GetCandidatesAsync(
+            logical,
+            ModelRoutingOperation.OpenAiOperation,
+            cancellationToken);
+        var routes = await FilterAuthorizedTargetsAsync(
+            user, logical.Id, candidates, cancellationToken);
+        if (routes.Count == 0)
+        {
+            throw NoCompatibleTargets(logical.PublicName);
+        }
+
+        return routes;
     }
 
-    private async Task<(ModelRoute Route, JsonArray Messages)> ValidateAndResolveAsync(
+    private async Task<(IReadOnlyList<ModelRoute> Routes, JsonArray Messages)> ValidateAndResolveAsync(
         ClaimsPrincipal user,
         JsonObject request,
         CancellationToken cancellationToken)
@@ -594,7 +742,7 @@ public sealed class OpenAiCompatibilityService(
                 null);
         }
 
-        var route = await ResolveRouteAsync(user, model, cancellationToken);
+        var logical = await ResolveRouteAsync(user, model, cancellationToken);
         if (request["messages"] is not JsonArray { Count: > 0 } messages)
         {
             throw new OpenAiCompatibilityException(
@@ -604,7 +752,37 @@ public sealed class OpenAiCompatibilityService(
                 null);
         }
 
-        return (route, messages);
+        var candidates = await routeSelector.GetCandidatesAsync(
+            logical,
+            ModelRoutingOperation.Chat,
+            cancellationToken);
+        var routes = await FilterAuthorizedTargetsAsync(
+            user, logical.Id, candidates, cancellationToken);
+        if (routes.Count == 0)
+        {
+            throw NoCompatibleTargets(logical.PublicName);
+        }
+
+        return (routes, messages);
+    }
+
+    private async Task<IReadOnlyList<ModelRoute>> FilterAuthorizedTargetsAsync(
+        ClaimsPrincipal user,
+        Guid logicalRouteId,
+        IReadOnlyList<ModelRoute> candidates,
+        CancellationToken cancellationToken)
+    {
+        var allowed = new List<ModelRoute>(candidates.Count);
+        foreach (var candidate in candidates)
+        {
+            if (await permissions.CanAccessModelRouteTargetAsync(
+                    user, logicalRouteId, candidate.ProviderId, cancellationToken))
+            {
+                allowed.Add(candidate);
+            }
+        }
+
+        return allowed;
     }
 
     private async Task<ModelRoute> ResolveRouteAsync(
@@ -615,7 +793,7 @@ public sealed class OpenAiCompatibilityService(
         var route = await db.ModelRoutes.AsNoTracking()
             .Include(x => x.Provider)
             .SingleOrDefaultAsync(
-                x => x.PublicName == publicModel && x.Enabled && x.Provider.Enabled,
+                x => x.PublicName == publicModel && x.Enabled,
                 cancellationToken);
 
         if (route is null ||
@@ -1336,7 +1514,8 @@ public sealed class OpenAiCompatibilityService(
         {
             var text = await response.Content.ReadAsStringAsync(cancellationToken);
             var safeBody = text.Length > 2048 ? text[..2048] : text;
-            throw new InvalidOperationException(
+            throw new DownstreamModelException(
+                (int)response.StatusCode,
                 $"Downstream model provider returned {(int)response.StatusCode} {response.ReasonPhrase}: {safeBody}");
         }
         finally
@@ -1344,6 +1523,13 @@ public sealed class OpenAiCompatibilityService(
             response.Dispose();
         }
     }
+}
+
+/// <summary>Downstream HTTP failure used by the router to decide whether failover is safe.</summary>
+public sealed class DownstreamModelException(int statusCode, string message) : InvalidOperationException(message)
+{
+    /// <summary>HTTP status returned by the downstream provider.</summary>
+    public int StatusCode { get; } = statusCode;
 }
 
 /// <summary>Error mapped to the standard OpenAI API error envelope.</summary>

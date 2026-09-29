@@ -1281,7 +1281,7 @@ For the native AWS Bedrock provider, generic OpenAI-v1 operations are sent to th
 
 ### 20.4 Models and authorization
 
-A model route maps one public OpenAI model ID to one provider-native model ID. Examples include:
+A model route is a logical public OpenAI model ID. Its existing provider/model pair is the implicit primary target at priority `0` with weight `100`. Additional targets can point at other providers or model IDs without changing the public alias. Examples of the primary mapping include:
 
 ```text
 public alias         provider        downstream model
@@ -1291,7 +1291,18 @@ research-large       Hugging Face    openai/gpt-oss-120b:fastest
 bedrock-reasoner     Bedrock         global.openai.gpt-5.6-sol
 ```
 
-Role permissions are evaluated before model metadata or inference traffic is returned. A route grant permits that public model through `/v1`. A provider-wide grant permits every route on the provider and also permits the native provider proxy.
+Role permissions are evaluated before model metadata or inference traffic is returned. A route grant permits that logical public model through `/v1` and authorizes its internal routing targets. A provider-wide grant permits every route whose primary provider is that provider and also permits the native provider proxy. When access comes only from provider-wide grants, a secondary routing target is eligible only when the caller is also allowed to use that target provider.
+
+Routing targets use two controls:
+
+- **Priority** defines a routing tier. Lower numbers are preferred. The primary target is always priority `0`.
+- **Weight** controls relative traffic among healthy targets at the same priority. The primary target has weight `100`.
+
+Equal-priority targets use smooth weighted round-robin. If the selected target returns a retryable provider failure such as HTTP `408`, `409`, `425`, `429`, `5xx`, a network failure, or an invalid provider response, the router tries the next eligible target and then higher-priority tiers. Three consecutive failures open an in-memory circuit for that provider/model target for 30 seconds. A success closes the circuit. If every target is in cooldown, the router still attempts the configured candidates rather than hard-failing solely because of circuit state.
+
+Streaming requests may fail over only before the first output event or chunk. After streaming output begins, the gateway never splices a second provider into the same response. Generic OpenAI operations automatically skip target types that cannot expose that contract, such as native Ollama targets for `/v1/responses` or `/v1/embeddings`.
+
+Routing targets are managed from **Models → Routing targets** or through `/admin/model-route-targets`. Existing single-provider routes require no migration or configuration change.
 
 Unauthorized or unknown model aliases use OpenAI-style `model_not_found` responses without disclosing whether a hidden route exists.
 

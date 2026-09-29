@@ -290,11 +290,11 @@ public sealed class ModelSchemaUpgradeTests
                 SELECT COUNT(*)
                 FROM sqlite_master
                 WHERE type = 'table'
-                  AND name IN ('ModelProviders', 'ModelRoutes', 'ModelPermissions');
+                  AND name IN ('ModelProviders', 'ModelRoutes', 'ModelRouteTargets', 'ModelPermissions');
                 """;
 
             var count = Convert.ToInt64(await command.ExecuteScalarAsync());
-            Assert.Equal(3, count);
+            Assert.Equal(4, count);
 
             db.ModelProviders.Add(new ModelProvider
             {

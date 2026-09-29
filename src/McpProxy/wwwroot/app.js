@@ -7,6 +7,7 @@ const state = {
   servers: [],
   modelProviders: [],
   modelRoutes: [],
+  modelRouteTargets: [],
   modelPermissions: [],
   users: [],
   apiKeys: [],
@@ -98,11 +99,12 @@ function emptyState(icon, message) {
 // ---- data loading ----
 
 async function loadAll() {
-  const [roles, servers, modelProviders, modelRoutes, modelPermissions, users, apiKeys, mappings, permissions] = await Promise.all([
+  const [roles, servers, modelProviders, modelRoutes, modelRouteTargets, modelPermissions, users, apiKeys, mappings, permissions] = await Promise.all([
     api("GET", "/admin/roles"),
     api("GET", "/admin/servers"),
     api("GET", "/admin/model-providers"),
     api("GET", "/admin/model-routes"),
+    api("GET", "/admin/model-route-targets"),
     api("GET", "/admin/model-permissions"),
     api("GET", "/admin/users"),
     api("GET", "/admin/apikeys"),
@@ -113,6 +115,7 @@ async function loadAll() {
   state.servers = servers;
   state.modelProviders = modelProviders;
   state.modelRoutes = modelRoutes;
+  state.modelRouteTargets = modelRouteTargets;
   state.modelPermissions = modelPermissions;
   state.users = users;
   state.apiKeys = apiKeys;
@@ -302,17 +305,25 @@ function renderModels() {
       </td>
     </tr>`).join("");
 
-  const routeRows = state.modelRoutes.map((r) => `
+  const routeRows = state.modelRoutes.map((r) => {
+    const extraTargets = state.modelRouteTargets.filter((t) => t.modelRouteId === r.id && t.enabled);
+    const routing = extraTargets.length
+      ? `<span class="badge text-bg-primary">${1 + extraTargets.length} targets</span>`
+      : '<span class="badge text-bg-light border text-dark">Primary only</span>';
+    return `
     <tr>
       <td class="fw-semibold"><code>${escapeHtml(r.publicName)}</code></td>
       <td>${escapeHtml(r.providerName)}</td>
       <td><code>${escapeHtml(r.downstreamModel)}</code></td>
+      <td>${routing}</td>
       <td>${r.enabled ? '<span class="badge text-bg-success">Enabled</span>' : '<span class="badge text-bg-secondary">Disabled</span>'}</td>
       <td class="text-nowrap">
+        <button class="btn btn-sm btn-outline-primary ab" data-action="manage-model-route-targets" data-id="${r.id}" title="Routing targets"><i class="bi bi-shuffle"></i></button>
         <button class="btn btn-sm btn-outline-secondary ab" data-action="open-edit-model-route" data-id="${r.id}" title="Edit"><i class="bi bi-pencil"></i></button>
         <button class="btn btn-sm btn-outline-danger ab" data-action="delete-model-route" data-id="${r.id}" title="Delete"><i class="bi bi-trash"></i></button>
       </td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   const grantRows = state.modelPermissions.map((g) => `
     <tr>
@@ -325,7 +336,7 @@ function renderModels() {
   el("tab-models").innerHTML =
     pageHeader("bi-cpu", "Model Router",
       '<div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" data-action="open-add-model-route"><i class="bi bi-signpost me-1"></i>Add Model Route</button><button class="btn btn-sm btn-primary" data-action="open-add-model-provider"><i class="bi bi-plus-lg me-1"></i>Add Provider</button></div>') +
-    `<p class="text-muted small">OpenAI-compatible API: <code>/v1</code> with models, Chat Completions, Responses, and generic JSON OpenAI model operations, including SSE streaming. The older <code>/models/chat</code> endpoint remains for compatibility. Native provider APIs remain under <code>/models/native/{provider}/...</code>.</p>
+    `<p class="text-muted small">OpenAI-compatible API: <code>/v1</code> with models, Chat Completions, Responses, and generic JSON OpenAI model operations, including SSE streaming. A public model route can span multiple providers. Equal-priority targets share traffic by weight, higher priorities provide failover, and repeatedly failing targets enter a short circuit-breaker cooldown. The older <code>/models/chat</code> endpoint remains for compatibility.</p>
     <h6 class="mt-3">Providers</h6>` +
     (state.modelProviders.length ? `
       <table class="table table-sm align-middle bg-white">
@@ -335,7 +346,7 @@ function renderModels() {
     `<h6 class="mt-4">Public model routes</h6>` +
     (state.modelRoutes.length ? `
       <table class="table table-sm align-middle bg-white">
-        <thead><tr><th>Public model</th><th>Provider</th><th>Downstream model</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Public model</th><th>Primary provider</th><th>Primary model</th><th>Routing</th><th>Status</th><th></th></tr></thead>
         <tbody>${routeRows}</tbody>
       </table>` : emptyState("bi-signpost", "No model routes registered yet.")) +
     `<div class="d-flex align-items-center justify-content-between mt-4 mb-2">
@@ -421,6 +432,80 @@ function modelRouteModalHtml(route) {
         <button type="submit" class="btn btn-primary">${route ? "Save" : "Add Route"}</button>
       </div>
     </form>`;
+}
+
+function modelRouteTargetFormHtml(route, target) {
+  const providers = state.modelProviders.map((p) =>
+    `<option value="${p.id}" ${target?.providerId === p.id ? "selected" : ""}>${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join("");
+
+  return `
+    <p class="text-muted small mb-3">Route <code>${escapeHtml(route.publicName)}</code>. Priority <strong>0</strong> joins the primary load-balancing tier. Higher numbers are failover tiers. Weight controls relative traffic only among targets at the same priority.</p>
+    <form id="model-route-target-form">
+      <div class="row g-3">
+        <div class="col-md-5"><label class="form-label">Provider</label>
+          <select class="form-select" name="providerId" required><option value="">Choose...</option>${providers}</select></div>
+        <div class="col-md-7"><label class="form-label">Downstream model</label>
+          <input class="form-control" name="downstreamModel" value="${escapeHtml(target?.downstreamModel || "")}" required></div>
+        <div class="col-md-4"><label class="form-label">Priority</label>
+          <input class="form-control" name="priority" type="number" min="0" max="100000" value="${target?.priority ?? 100}" required></div>
+        <div class="col-md-4"><label class="form-label">Weight</label>
+          <input class="form-control" name="weight" type="number" min="1" max="10000" value="${target?.weight ?? 100}" required></div>
+        <div class="col-md-4 d-flex align-items-end pb-2"><div class="form-check">
+          <input class="form-check-input" type="checkbox" name="enabled" id="route-target-enabled" ${target?.enabled !== false ? "checked" : ""}>
+          <label class="form-check-label" for="route-target-enabled">Enabled</label>
+        </div></div>
+      </div>
+      <div class="mt-4 text-end">
+        <button type="button" class="btn btn-secondary" data-action="manage-model-route-targets" data-id="${route.id}">Back</button>
+        <button type="submit" class="btn btn-primary">${target ? "Save Target" : "Add Target"}</button>
+      </div>
+    </form>`;
+}
+
+function modelRouteTargetsHtml(route) {
+  const targets = state.modelRouteTargets
+    .filter((t) => t.modelRouteId === route.id)
+    .sort((a, b) => a.priority - b.priority || a.providerName.localeCompare(b.providerName));
+
+  const rows = [];
+  rows.push(`
+    <tr>
+      <td><span class="badge text-bg-primary">Primary</span></td>
+      <td>${escapeHtml(route.providerName)}</td>
+      <td><code>${escapeHtml(route.downstreamModel)}</code></td>
+      <td>0</td><td>100</td>
+      <td><span class="badge text-bg-success">Enabled</span></td>
+      <td></td>
+    </tr>`);
+
+  for (const t of targets) {
+    rows.push(`
+    <tr>
+      <td>${t.priority === 0 ? '<span class="badge text-bg-info">Balanced</span>' : '<span class="badge text-bg-warning">Failover</span>'}</td>
+      <td>${escapeHtml(t.providerName)}</td>
+      <td><code>${escapeHtml(t.downstreamModel)}</code></td>
+      <td>${t.priority}</td>
+      <td>${t.weight}</td>
+      <td>${t.enabled ? '<span class="badge text-bg-success">Enabled</span>' : '<span class="badge text-bg-secondary">Disabled</span>'}</td>
+      <td class="text-nowrap">
+        <button class="btn btn-sm btn-outline-secondary ab" data-action="open-edit-model-route-target" data-id="${t.id}" title="Edit"><i class="bi bi-pencil"></i></button>
+        <button class="btn btn-sm btn-outline-danger ab" data-action="delete-model-route-target" data-id="${t.id}" title="Delete"><i class="bi bi-trash"></i></button>
+      </td>
+    </tr>`);
+  }
+
+  return `
+    <div class="d-flex justify-content-between align-items-start mb-3">
+      <div>
+        <div class="fw-semibold"><code>${escapeHtml(route.publicName)}</code></div>
+        <div class="text-muted small">Equal priority = weighted load balancing. Higher priority = failover after lower tiers fail or enter cooldown.</div>
+      </div>
+      <button class="btn btn-sm btn-primary" data-action="open-add-model-route-target" data-id="${route.id}"><i class="bi bi-plus-lg me-1"></i>Add Target</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Priority</th><th>Weight</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.join("")}</tbody>\n      </table>\n    </div>\n    <div class="alert alert-light border small mb-0">\n      The primary target is the provider/model configured on the route itself. It always participates at priority 0 with weight 100.\n      Streams may fail over only before their first emitted chunk.\n    </div>`;
 }
 
 function modelPermissionModalHtml() {
@@ -959,6 +1044,63 @@ const ACTION_HANDLERS = {
     if (!confirm("Delete this public model route?")) return;
     await api("DELETE", `/admin/model-routes/${id}`);
     showToast("Model route deleted.");
+    await loadAll();
+  },
+  "manage-model-route-targets": (id) => {
+    const route = state.modelRoutes.find((r) => r.id === id);
+    if (!route) return;
+    openModal('<i class="bi bi-shuffle me-2"></i>Model Routing', modelRouteTargetsHtml(route));
+  },
+  "open-add-model-route-target": (id) => {
+    const route = state.modelRoutes.find((r) => r.id === id);
+    if (!route) return;
+    openModal('<i class="bi bi-plus-circle me-2"></i>Add Routing Target', modelRouteTargetFormHtml(route));
+    el("model-route-target-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      try {
+        await api("POST", "/admin/model-route-targets", {
+          modelRouteId: route.id,
+          providerId: form.get("providerId"),
+          downstreamModel: form.get("downstreamModel"),
+          priority: Number(form.get("priority")),
+          weight: Number(form.get("weight")),
+          enabled: form.get("enabled") === "on"
+        });
+        showToast("Routing target added.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "open-edit-model-route-target": (id) => {
+    const target = state.modelRouteTargets.find((t) => t.id === id);
+    const route = target && state.modelRoutes.find((r) => r.id === target.modelRouteId);
+    if (!target || !route) return;
+    openModal('<i class="bi bi-pencil me-2"></i>Edit Routing Target', modelRouteTargetFormHtml(route, target));
+    el("model-route-target-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      try {
+        await api("PUT", `/admin/model-route-targets/${id}`, {
+          modelRouteId: route.id,
+          providerId: form.get("providerId"),
+          downstreamModel: form.get("downstreamModel"),
+          priority: Number(form.get("priority")),
+          weight: Number(form.get("weight")),
+          enabled: form.get("enabled") === "on"
+        });
+        showToast("Routing target updated.");
+        closeModal();
+        await loadAll();
+      } catch (err) { showToast(err.message, true); }
+    });
+  },
+  "delete-model-route-target": async (id) => {
+    if (!confirm("Delete this routing target?")) return;
+    await api("DELETE", `/admin/model-route-targets/${id}`);
+    showToast("Routing target deleted.");
+    closeModal();
     await loadAll();
   },
   "open-add-model-permission": () => {

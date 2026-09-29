@@ -241,6 +241,8 @@ public sealed class ModelProvider
     public List<ModelRoute> Routes { get; set; } = [];
     /// <summary>Role grants that authorize native provider access.</summary>
     public List<ModelPermission> Permissions { get; set; } = [];
+    /// <summary>Additional logical-route targets that use this provider.</summary>
+    public List<ModelRouteTarget> RouteTargets { get; set; } = [];
 }
 
 /// <summary>A public model alias mapped to a provider-specific model identifier.</summary>
@@ -262,6 +264,36 @@ public sealed class ModelRoute
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     /// <summary>Role grants that authorize this model alias.</summary>
     public List<ModelPermission> Permissions { get; set; } = [];
+    /// <summary>Additional routing targets behind this public alias.</summary>
+    public List<ModelRouteTarget> Targets { get; set; } = [];
+}
+
+/// <summary>
+/// Additional downstream target for a public model route. The ModelRoute's existing provider/model
+/// pair remains the implicit primary target at priority 0 and weight 100.
+/// </summary>
+public sealed class ModelRouteTarget
+{
+    /// <summary>Stable identifier for this routing target.</summary>
+    public Guid Id { get; set; } = Guid.NewGuid();
+    /// <summary>Logical public route owning this target.</summary>
+    public Guid ModelRouteId { get; set; }
+    /// <summary>Logical public route owning this target.</summary>
+    public ModelRoute ModelRoute { get; set; } = null!;
+    /// <summary>Provider receiving traffic when this target is selected.</summary>
+    public Guid ProviderId { get; set; }
+    /// <summary>Provider receiving traffic when this target is selected.</summary>
+    public ModelProvider Provider { get; set; } = null!;
+    /// <summary>Provider-native model identifier.</summary>
+    public required string DownstreamModel { get; set; }
+    /// <summary>Routing tier. Lower values are attempted before higher values.</summary>
+    public int Priority { get; set; } = 100;
+    /// <summary>Relative traffic share among healthy targets at the same priority.</summary>
+    public int Weight { get; set; } = 100;
+    /// <summary>Whether this target may receive routed traffic.</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>UTC creation timestamp.</summary>
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 /// <summary>Whether a model permission covers a whole provider or one public model route.</summary>

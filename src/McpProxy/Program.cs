@@ -89,6 +89,8 @@ builder.Services.AddSingleton<CatalogCache>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<CatalogCache>());
 builder.Services.AddScoped<GatewayService>();
 builder.Services.AddScoped<ModelRouterService>();
+builder.Services.AddSingleton<ModelRoutingState>();
+builder.Services.AddScoped<ModelRouteSelector>();
 builder.Services.AddScoped<OpenAiCompatibilityService>();
 builder.Services.AddScoped<NativeModelProxyService>();
 
