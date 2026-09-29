@@ -50,6 +50,69 @@ public sealed class OpenAiCompatibilityTests
     }
 
     [Fact]
+    public async Task Explicit_model_overrides_configured_default_router()
+    {
+        var handler = new OpenAiHandler();
+        var fixture = await CreateAsync(
+            ModelProviderKind.OpenAiCompatible,
+            "https://default.example/v1",
+            handler);
+
+        var explicitProvider = new ModelProvider
+        {
+            Name = "Explicit Provider",
+            Slug = "explicit-provider",
+            Kind = ModelProviderKind.OpenAiCompatible,
+            BaseEndpoint = "https://explicit.example/v1"
+        };
+        var explicitRoute = new ModelRoute
+        {
+            ProviderId = explicitProvider.Id,
+            Provider = explicitProvider,
+            PublicName = "explicit-model",
+            DownstreamModel = "explicit-downstream-model",
+            Enabled = true,
+            IsDefault = false
+        };
+
+        var roleId = await fixture.Db.Set<UserRole>()
+            .Select(x => x.RoleId)
+            .SingleAsync();
+
+        fixture.Db.AddRange(explicitProvider, explicitRoute);
+        fixture.Db.Add(new ModelPermission
+        {
+            RoleId = roleId,
+            Scope = ModelPermissionScope.Route,
+            ModelRouteId = explicitRoute.Id
+        });
+        await fixture.Db.SaveChangesAsync();
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "model":"explicit-model",
+              "messages":[{"role":"user","content":"Use the model I selected."}]
+            }
+            """)!.AsObject();
+
+        var response = await fixture.Service.CreateChatCompletionAsync(
+            fixture.Principal,
+            request,
+            default);
+
+        Assert.Equal("explicit-model", response["model"]?.GetValue<string>());
+        Assert.Equal(
+            "https://explicit.example/v1/chat/completions",
+            handler.LastRequest?.RequestUri?.ToString());
+
+        var downstream = JsonNode.Parse(handler.LastBody!)!.AsObject();
+        Assert.Equal(
+            "explicit-downstream-model",
+            downstream["model"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Native_openai_provider_preserves_contract_and_rewrites_only_model_identity()
     {
         var handler = new OpenAiHandler();
