@@ -1,7 +1,7 @@
-import { el, signIn, template } from './shared.js?v=5';
-import { renderChat } from './chat.js?v=5';
-import { renderServers } from './servers.js?v=5';
-import { renderSettings } from './settings.js?v=5';
+import { el, signIn, template } from './shared.js?v=6';
+import { renderChat } from './chat.js?v=6';
+import { renderServers } from './servers.js?v=6';
+import { renderSettings } from './settings.js?v=6';
 
 const view = document.getElementById('view');
 const sessionBar = document.getElementById('session');

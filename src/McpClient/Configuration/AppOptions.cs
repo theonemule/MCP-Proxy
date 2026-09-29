@@ -37,29 +37,69 @@ public sealed class OidcOptions
     public bool Enabled { get; set; } = true;
 }
 
-/// <summary>OpenAI-compatible endpoint and agent-loop settings.</summary>
+/// <summary>Model connection selected by the client for inference.</summary>
+public enum LlmSource
+{
+    /// <summary>Route inference through MCP Proxy's OpenAI-compatible /v1 surface.</summary>
+    Proxy,
+    /// <summary>Call a hosted OpenAI-compatible provider directly.</summary>
+    Hosted
+}
+
+/// <summary>One OpenAI-compatible model connection profile.</summary>
+public sealed class LlmConnectionOptions
+{
+    /// <summary>OpenAI-compatible API base URL.</summary>
+    public string Endpoint { get; set; } = string.Empty;
+    /// <summary>API key. Proxy mode may leave this empty to reuse the signed-in user's access token.</summary>
+    public string ApiKey { get; set; } = string.Empty;
+    /// <summary>Public proxy model alias or hosted provider model/deployment ID.</summary>
+    public string Model { get; set; } = string.Empty;
+}
+
+/// <summary>Connection values used to test OpenAI model discovery without first saving settings.</summary>
+public sealed record LlmModelDiscoveryRequest(LlmSource Source, string Endpoint, string? ApiKey);
+
+/// <summary>Switchable proxy/hosted model profiles and shared agent-loop settings.</summary>
 public sealed class LlmOptions
 {
     /// <summary>Configuration section name.</summary>
     public const string SectionName = "Llm";
 
-    /// <summary>OpenAI-compatible endpoint. Azure OpenAI: https://{resource}.openai.azure.com/openai/v1</summary>
-    /// <summary>OpenAI-compatible API base URL.</summary>
-    public string Endpoint { get; set; } = "https://api.openai.com/v1";
-    /// <summary>API key used by the configured chat model.</summary>
-    public string ApiKey { get; set; } = string.Empty;
-    /// <summary>Model or deployment name.</summary>
-    public string Model { get; set; } = "gpt-4o-mini";
+    /// <summary>Profile used for the next chat turn.</summary>
+    public LlmSource Source { get; set; } = LlmSource.Hosted;
+
+    /// <summary>MCP Proxy OpenAI-compatible model profile.</summary>
+    public LlmConnectionOptions Proxy { get; set; } = new()
+    {
+        Endpoint = "http://localhost:5105/v1"
+    };
+
+    /// <summary>Direct hosted OpenAI-compatible model profile.</summary>
+    public LlmConnectionOptions Hosted { get; set; } = new()
+    {
+        Endpoint = "https://api.openai.com/v1",
+        Model = "gpt-4o-mini"
+    };
+
     /// <summary>System instruction sent at the beginning of each conversation.</summary>
     public string SystemPrompt { get; set; } =
         "You are a helpful assistant with access to tools exposed by MCP servers. " +
         "Use the tools when they help answer the user's request, and explain what you did.";
+
     /// <summary>Optional sampling temperature.</summary>
     public float? Temperature { get; set; }
+
     /// <summary>Optional maximum output token count.</summary>
     public int? MaxOutputTokens { get; set; }
+
     /// <summary>Maximum number of tool-call iterations for one chat request.</summary>
     public int MaxToolIterations { get; set; } = 10;
+
+    /// <summary>Returns the currently selected model connection.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public LlmConnectionOptions ActiveConnection =>
+        Source == LlmSource.Proxy ? Proxy : Hosted;
 }
 
 /// <summary>Credential forwarding mode for a downstream MCP server.</summary>

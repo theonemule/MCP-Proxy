@@ -205,9 +205,13 @@ through its administration API when the service should expose it to other MCP cl
 
 `McpSessionFactory` connects to enabled servers. It can forward an access token, ID token, no token, or a configured API key. Connection failures are collected in `McpConnectionSet` so one unavailable server does not prevent other servers from being used.
 
-`ChatService` obtains current LLM settings, connects to all enabled MCP servers, collects tools, prefixes tool names by server, submits the conversation to the configured `IChatClient`, and returns assistant text, tool-call records, and warnings. Conversation history is held by `ConversationStore` in memory and partitioned by user and conversation ID.
+`ChatService` obtains current LLM settings, selects either the Proxy or Hosted inference profile, connects to all enabled MCP servers, collects tools, prefixes tool names by server, submits the conversation to the configured `IChatClient`, and returns assistant text, tool-call records, and warnings. Conversation history is held by `ConversationStore` in memory and partitioned by user and conversation ID.
 
-`LlmSettingsStore` persists editable settings to `Data/llm-settings.json`. `LlmClientFactory` validates the endpoint and model before building an OpenAI-compatible chat client with the configured maximum tool iterations.
+`LlmSettingsStore` persists both inference profiles to `Data/llm-settings.json`. It migrates the earlier flat endpoint/API-key/model layout into the Hosted profile so existing client installations keep their direct provider configuration.
+
+`LlmClientFactory` builds the OpenAI-compatible client from the active profile. Proxy mode uses an explicitly configured gateway API key when present. When the proxy key is empty, `ChatService` supplies the signed-in user's access token so end-to-end OIDC and model-route RBAC can be tested. Hosted mode uses the hosted profile's API key.
+
+The client settings API does not return saved model API keys. Empty password fields preserve existing keys server-side. `POST /api/llm-models` performs OpenAI `GET /models` discovery against either profile and reports whether proxy discovery used an API key or the signed-in access token.
 
 ## HTTP Surface
 
