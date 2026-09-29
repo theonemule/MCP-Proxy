@@ -5,15 +5,15 @@ using OpenAI;
 
 namespace McpClient.Services;
 
-/// <summary>Builds an <see cref="IChatClient"/> from the currently selected hosted or proxy profile.</summary>
+/// <summary>Builds an <see cref="IChatClient"/> from the currently selected hosted or gateway profile.</summary>
 public sealed class LlmClientFactory(ILoggerFactory loggerFactory)
 {
     /// <summary>
     /// Builds a configured chat client. The OpenAI SDK places the configured credential in
-    /// Authorization: Bearer. In proxy mode that value may be an mcp_ key or OAuth/OIDC token.
-    /// <paramref name="proxyAccessToken"/> is used when the proxy profile has no explicit value.
+    /// Authorization: Bearer. In gateway mode that value may be an aigw_ key or OAuth/OIDC token.
+    /// <paramref name="gatewayAccessToken"/> is used when the gateway profile has no explicit value.
     /// </summary>
-    public IChatClient Create(LlmOptions settings, string? proxyAccessToken = null)
+    public IChatClient Create(LlmOptions settings, string? gatewayAccessToken = null)
     {
         var connection = settings.ActiveConnection;
 
@@ -35,16 +35,16 @@ public sealed class LlmClientFactory(ILoggerFactory loggerFactory)
         }
 
         var credential = connection.ApiKey;
-        if (settings.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(credential))
+        if (settings.Source == LlmSource.Gateway && string.IsNullOrWhiteSpace(credential))
         {
-            credential = proxyAccessToken;
+            credential = gatewayAccessToken;
         }
 
         if (string.IsNullOrWhiteSpace(credential))
         {
             throw new InvalidOperationException(
-                settings.Source == LlmSource.Proxy
-                    ? "Proxy authentication is not configured. Sign in with a proxy-scoped access token or set a proxy API key / OAuth access token."
+                settings.Source == LlmSource.Gateway
+                    ? "Gateway authentication is not configured. Sign in with a gateway-scoped access token or set a gateway API key / OAuth access token."
                     : "Hosted model API key is not configured.");
         }
 

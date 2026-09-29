@@ -299,13 +299,13 @@ api.MapGet("/llm-settings", (LlmSettingsStore store) => Results.Ok(PublicLlmSett
 api.MapPut("/llm-settings", (LlmOptions settings, LlmSettingsStore store) =>
 {
     var existing = store.Get();
-    settings.Proxy ??= new LlmConnectionOptions();
+    settings.Gateway ??= new LlmConnectionOptions();
     settings.Hosted ??= new LlmConnectionOptions();
 
     // Password fields are intentionally write-only. Empty means keep the existing credential.
-    if (string.IsNullOrWhiteSpace(settings.Proxy.ApiKey))
+    if (string.IsNullOrWhiteSpace(settings.Gateway.ApiKey))
     {
-        settings.Proxy.ApiKey = existing.Proxy.ApiKey;
+        settings.Gateway.ApiKey = existing.Gateway.ApiKey;
     }
     if (string.IsNullOrWhiteSpace(settings.Hosted.ApiKey))
     {
@@ -336,20 +336,20 @@ api.MapPost("/llm-models", async (
     }
 
     var persisted = store.Get();
-    var savedConnection = discovery.Source == LlmSource.Proxy ? persisted.Proxy : persisted.Hosted;
+    var savedConnection = discovery.Source == LlmSource.Gateway ? persisted.Gateway : persisted.Hosted;
     var credential = string.IsNullOrWhiteSpace(discovery.ApiKey)
         ? savedConnection.ApiKey
         : discovery.ApiKey.Trim();
 
     var authMode = "api-key";
-    if (discovery.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(credential))
+    if (discovery.Source == LlmSource.Gateway && string.IsNullOrWhiteSpace(credential))
     {
         credential = await tokenProvider.GetTokenAsync(ForwardedToken.AccessToken);
         authMode = "signed-in-oauth-token";
     }
-    else if (discovery.Source == LlmSource.Proxy)
+    else if (discovery.Source == LlmSource.Gateway)
     {
-        authMode = credential.StartsWith("mcp_", StringComparison.Ordinal)
+        authMode = credential.StartsWith("aigw_", StringComparison.Ordinal)
             ? "gateway-api-key"
             : "oauth-bearer-token";
     }
@@ -358,8 +358,8 @@ api.MapPost("/llm-models", async (
     {
         return Results.BadRequest(new
         {
-            error = discovery.Source == LlmSource.Proxy
-                ? "No proxy API key is configured and no signed-in access token is available."
+            error = discovery.Source == LlmSource.Gateway
+                ? "No gateway API key is configured and no signed-in access token is available."
                 : "No hosted API key is configured."
         });
     }
@@ -486,11 +486,11 @@ static string? ValidateServer(McpServerOptions server)
 static object PublicLlmSettings(LlmOptions settings) => new
 {
     source = settings.Source,
-    proxy = new
+    gateway = new
     {
-        endpoint = settings.Proxy.Endpoint,
-        model = settings.Proxy.Model,
-        apiKeyConfigured = !string.IsNullOrWhiteSpace(settings.Proxy.ApiKey)
+        endpoint = settings.Gateway.Endpoint,
+        model = settings.Gateway.Model,
+        apiKeyConfigured = !string.IsNullOrWhiteSpace(settings.Gateway.ApiKey)
     },
     hosted = new
     {
@@ -528,12 +528,12 @@ static string? ValidateLlmSettings(LlmOptions settings)
 
 static void NormalizeLlmSettings(LlmOptions settings)
 {
-    settings.Proxy ??= new LlmConnectionOptions();
+    settings.Gateway ??= new LlmConnectionOptions();
     settings.Hosted ??= new LlmConnectionOptions();
 
-    settings.Proxy.Endpoint = settings.Proxy.Endpoint.Trim();
-    settings.Proxy.Model = settings.Proxy.Model.Trim();
-    settings.Proxy.ApiKey = settings.Proxy.ApiKey?.Trim() ?? string.Empty;
+    settings.Gateway.Endpoint = settings.Gateway.Endpoint.Trim();
+    settings.Gateway.Model = settings.Gateway.Model.Trim();
+    settings.Gateway.ApiKey = settings.Gateway.ApiKey?.Trim() ?? string.Empty;
 
     settings.Hosted.Endpoint = settings.Hosted.Endpoint.Trim();
     settings.Hosted.Model = settings.Hosted.Model.Trim();

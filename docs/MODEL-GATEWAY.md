@@ -85,6 +85,8 @@ A raw OpenAI-compatible request may then omit model:
 
 The gateway resolves the default route and performs intelligent target selection within it.
 
+For model-driven selection, mark a different chat-capable route as isRoutingModel. The routing controller is infrastructure for the selection decision; it is not the public logical route the user is asking to run.
+
 ## SDKs that require a model string
 
 Create a normal route named something such as:
@@ -116,6 +118,27 @@ model in client request
     -> public route identity
         -> backend target selection
 ~~~
+
+## Guardrails and routing telemetry
+
+Model-based guardrails can wrap the model and MCP data plane independently of routing policy. Configure Guardrails.Model with an enabled model route that will act as the policy evaluator.
+
+For an input request, governance runs before target selection. For an output, governance runs before response bytes are released. Governed streaming responses are buffered until the output decision is known.
+
+The evaluator receives the configured policy prompt and sanitized captured content and must return a structured risk_score, action, reason, and categories. The proxy blocks when action is block or the score meets BlockThreshold.
+
+The guardrail model is invoked directly through the internal provider adapter rather than through the public /v1 surface. This prevents recursive routing and recursive guardrail evaluation.
+
+Routing emits structured telemetry for:
+
+- the resolved public route
+- inferred reasoning/capability requirements
+- candidate and failover order
+- selected provider and downstream model
+- model-driven intent summary, inference task, reasoning level, and rationale
+- downstream failures and failover
+
+These events share the request correlation ID with HTTP and MCP telemetry.
 
 ## Provider types
 
@@ -199,7 +222,7 @@ The proxy keeps that wire format.
 Bearer values are classified as:
 
 ~~~text
-mcp_...              -> gateway API-key authentication
+aigw_...              -> gateway API-key authentication
 other non-empty data -> JWT/OIDC bearer authentication
 ~~~
 
@@ -212,7 +235,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://gateway.example/v1",
-    api_key="mcp_<prefix>.<secret>",
+    api_key="aigw_<prefix>.<secret>",
 )
 ~~~
 
@@ -261,25 +284,42 @@ A route additionally has:
 | Field | Meaning |
 | --- | --- |
 | isDefault | Use this logical route when an OpenAI-compatible request omits model. |
+| isRoutingModel | Use this separate chat-capable route as the internal intent classifier and target selector. Only one is active. |
 
-## Requirement inference
+## Model-driven intent and task inference
 
-ModelRoutingRequirements.Infer examines the incoming OpenAI-compatible JSON.
+The router is model-driven when one enabled route is marked isRoutingModel.
 
-It currently detects:
+The routing model is separate from the default logical route. It is called directly, bypassing intelligent routing, so its own invocation cannot recurse.
+
+Before that call, ModelRouteSelector still performs deterministic hard filtering and health checks. Authorization is also applied first. The routing model therefore sees only candidates that are protocol-compatible, not known to violate hard request requirements, currently usable when healthy alternatives exist, and authorized for the caller.
+
+The routing-model prompt contains a bounded extraction of the request plus a compact candidate catalog. The model returns structured fields for intent_summary, inference_task, reasoning_level, selected_candidate, and a short rationale.
+
+The candidate catalog includes each model's configured reasoning level, context and output limits, tool/vision/JSON-Schema support, cost and latency tiers, and specialties. Specialties serve as advertised inference-task hints.
+
+The routing controller performs the semantic step: summarize what the caller is trying to accomplish, name the inference task, and match it against the available models.
+
+Request content is treated as untrusted data in the routing prompt. The controller is explicitly told not to follow instructions embedded in the request.
+
+If no routing model is configured, the routing model fails, or its response is invalid, routing falls back to the deterministic selector order. The inference request is not failed solely because the routing-model call failed.
+
+## Deterministic requirement inference and fallback
+
+ModelRoutingRequirements.Infer still examines the incoming OpenAI-compatible JSON before model-driven selection.
+
+It detects structural requirements that should not depend on an LLM judgment:
 
 - explicit reasoning effort
-- text suggesting reasoning complexity
 - approximate input size
 - requested output size
 - function or tool use
 - image or vision inputs
 - structured JSON or JSON-Schema output
-- coarse specialty
+- coarse specialty hints used for fallback scoring
 
-The selector is heuristic. It does not invoke another model to classify the request.
+These signals drive hard filters and provide the fallback ranking when model-driven selection is unavailable.
 
-That avoids recursive inference cost, latency, and failure dependencies.
 
 ## Reasoning inference
 
@@ -341,7 +381,7 @@ Unknown capability values are not hard failures.
 
 ## Suitability scoring
 
-After hard filters, the router computes a suitability score.
+After hard filters, the deterministic selector computes a suitability score. This ordering is the fallback and the failover tail when model-driven routing is enabled.
 
 The strongest soft penalty is insufficient reasoning capability.
 
@@ -355,15 +395,7 @@ Cost and latency matter more for simple work than for high-reasoning work.
 
 ## Priority and weight
 
-Priority and weight are deliberately secondary:
-
-~~~text
-task and capability fit
-    before
-administrative priority
-    before
-weight
-~~~
+Priority and weight are deliberately secondary. With model-driven routing, the routing model chooses the preferred eligible candidate first. Deterministic suitability, priority, and weight preserve a stable fallback and failover order for the remaining candidates.
 
 Priority is compared when candidates have the same suitability score.
 
@@ -499,6 +531,7 @@ Content-Type: application/json
   "downstreamModel": "gpt-5.6",
   "enabled": true,
   "isDefault": true,
+  "isRoutingModel": false,
   "priority": 0,
   "weight": 100,
   "reasoningLevel": 3,
@@ -512,6 +545,8 @@ Content-Type: application/json
   "specialties": "general,coding,math"
 }
 ~~~
+
+To configure the model that makes routing decisions, create or edit a **separate** chat-capable route with `"isDefault": false` and `"isRoutingModel": true`. The admin API automatically clears that flag from any previously designated routing model.
 
 Reasoning enum values:
 
@@ -581,7 +616,7 @@ Model permission enum values are:
 ## Chat Completions with a named route
 
 ~~~bash
-curl https://gateway.example/v1/chat/completions   -H 'Authorization: Bearer mcp_<prefix>.<secret>'   -H 'Content-Type: application/json'   -d '{
+curl https://gateway.example/v1/chat/completions   -H 'Authorization: Bearer aigw_<prefix>.<secret>'   -H 'Content-Type: application/json'   -d '{
     "model": "router",
     "messages": [
       {"role": "user", "content": "Review this C# service for race conditions."}
@@ -592,7 +627,7 @@ curl https://gateway.example/v1/chat/completions   -H 'Authorization: Bearer mcp
 ## Chat Completions with the default route
 
 ~~~bash
-curl https://gateway.example/v1/chat/completions   -H 'Authorization: Bearer mcp_<prefix>.<secret>'   -H 'Content-Type: application/json'   -d '{
+curl https://gateway.example/v1/chat/completions   -H 'Authorization: Bearer aigw_<prefix>.<secret>'   -H 'Content-Type: application/json'   -d '{
     "messages": [
       {"role": "user", "content": "Review this C# service for race conditions."}
     ]

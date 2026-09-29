@@ -1,0 +1,677 @@
+using System.Text.RegularExpressions;
+using AIGovernanceGateway.Data;
+using AIGovernanceGateway.Security;
+using Microsoft.EntityFrameworkCore;
+
+namespace AIGovernanceGateway.Admin;
+
+/// <summary>Request to create or replace a model provider.</summary>
+public sealed record CreateModelProviderRequest(
+    string Name,
+    string Slug,
+    ModelProviderKind Kind,
+    string? BaseEndpoint,
+    string? ChatPath,
+    bool Enabled,
+    string? CredentialReference,
+    string CredentialHeader = "Authorization",
+    string CredentialPrefix = "Bearer ",
+    string? AwsRegion = null,
+    string? AwsAccessKeyReference = null,
+    string? AwsSecretKeyReference = null,
+    string? AwsSessionTokenReference = null);
+
+/// <summary>Request to create or replace a public model route.</summary>
+public sealed record CreateModelRouteRequest(
+    Guid ProviderId,
+    string PublicName,
+    string DownstreamModel,
+    bool Enabled = true,
+    bool IsDefault = false,
+    bool IsRoutingModel = false,
+    int Priority = 0,
+    int Weight = 100,
+    ModelReasoningLevel ReasoningLevel = ModelReasoningLevel.Medium,
+    int MaxContextTokens = 0,
+    int MaxOutputTokens = 0,
+    bool? SupportsTools = null,
+    bool? SupportsVision = null,
+    bool? SupportsJsonSchema = null,
+    int CostTier = 0,
+    int LatencyTier = 0,
+    string? Specialties = null);
+
+/// <summary>Request to add or replace one intelligent-routing target behind a public route.</summary>
+public sealed record CreateModelRouteTargetRequest(
+    Guid ModelRouteId,
+    Guid ProviderId,
+    string DownstreamModel,
+    int Priority = 100,
+    int Weight = 100,
+    bool Enabled = true,
+    ModelReasoningLevel ReasoningLevel = ModelReasoningLevel.Medium,
+    int MaxContextTokens = 0,
+    int MaxOutputTokens = 0,
+    bool? SupportsTools = null,
+    bool? SupportsVision = null,
+    bool? SupportsJsonSchema = null,
+    int CostTier = 0,
+    int LatencyTier = 0,
+    string? Specialties = null);
+
+/// <summary>Request to grant a role access to a provider or model route.</summary>
+public sealed record CreateModelPermissionRequest(
+    Guid RoleId,
+    ModelPermissionScope Scope,
+    Guid? ProviderId,
+    Guid? ModelRouteId);
+
+/// <summary>Administrative endpoints for model providers, public model aliases, and their role grants.</summary>
+public static partial class ModelAdminEndpoints
+{
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant)]
+    private static partial Regex SafeSlugRegex();
+
+    /// <summary>Maps model-router administration into the existing /admin route group.</summary>
+    public static void MapModelAdminEndpoints(this RouteGroupBuilder admin)
+    {
+        MapProviders(admin.MapGroup("/model-providers").RequireAdminScope(AdminScope.ServerAdmin));
+        MapRoutes(admin.MapGroup("/model-routes").RequireAdminScope(AdminScope.ServerAdmin));
+        MapRouteTargets(admin.MapGroup("/model-route-targets").RequireAdminScope(AdminScope.ServerAdmin));
+        MapPermissions(admin.MapGroup("/model-permissions").RequireAdminScope(AdminScope.UserAdmin));
+    }
+
+    private static void MapProviders(RouteGroupBuilder providers)
+    {
+        providers.MapGet("/", async (GovernanceDbContext db) =>
+            Results.Ok(await db.ModelProviders.AsNoTracking()
+                .OrderBy(x => x.Name)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.Name,
+                    x.Slug,
+                    x.Kind,
+                    x.BaseEndpoint,
+                    x.ChatPath,
+                    x.Enabled,
+                    x.CredentialReference,
+                    x.CredentialHeader,
+                    x.CredentialPrefix,
+                    x.AwsRegion,
+                    x.AwsAccessKeyReference,
+                    x.AwsSecretKeyReference,
+                    x.AwsSessionTokenReference
+                })
+                .ToListAsync()));
+
+        providers.MapPost("/", async (CreateModelProviderRequest request, GovernanceDbContext db) =>
+        {
+            var validation = await ValidateProviderAsync(request, null, db);
+            if (validation is not null) return validation;
+
+            var provider = new ModelProvider
+            {
+                Name = request.Name.Trim(),
+                Slug = request.Slug.Trim(),
+                Kind = request.Kind,
+                BaseEndpoint = request.BaseEndpoint?.Trim() ?? "",
+                ChatPath = string.IsNullOrWhiteSpace(request.ChatPath) ? null : request.ChatPath.Trim(),
+                Enabled = request.Enabled,
+                CredentialReference = NullIfWhiteSpace(request.CredentialReference),
+                CredentialHeader = request.CredentialHeader,
+                CredentialPrefix = request.CredentialPrefix,
+                AwsRegion = NullIfWhiteSpace(request.AwsRegion),
+                AwsAccessKeyReference = NullIfWhiteSpace(request.AwsAccessKeyReference),
+                AwsSecretKeyReference = NullIfWhiteSpace(request.AwsSecretKeyReference),
+                AwsSessionTokenReference = NullIfWhiteSpace(request.AwsSessionTokenReference)
+            };
+            db.ModelProviders.Add(provider);
+            await db.SaveChangesAsync();
+            return Results.Created($"/admin/model-providers/{provider.Id}", new { provider.Id });
+        });
+
+        providers.MapPut("/{id:guid}", async (
+            Guid id,
+            CreateModelProviderRequest request,
+            GovernanceDbContext db) =>
+        {
+            var provider = await db.ModelProviders.SingleOrDefaultAsync(x => x.Id == id);
+            if (provider is null) return Results.NotFound();
+
+            var validation = await ValidateProviderAsync(request, id, db);
+            if (validation is not null) return validation;
+
+            provider.Name = request.Name.Trim();
+            provider.Slug = request.Slug.Trim();
+            provider.Kind = request.Kind;
+            provider.BaseEndpoint = request.BaseEndpoint?.Trim() ?? "";
+            provider.ChatPath = string.IsNullOrWhiteSpace(request.ChatPath) ? null : request.ChatPath.Trim();
+            provider.Enabled = request.Enabled;
+            provider.CredentialReference = NullIfWhiteSpace(request.CredentialReference);
+            provider.CredentialHeader = request.CredentialHeader;
+            provider.CredentialPrefix = request.CredentialPrefix;
+            provider.AwsRegion = NullIfWhiteSpace(request.AwsRegion);
+            provider.AwsAccessKeyReference = NullIfWhiteSpace(request.AwsAccessKeyReference);
+            provider.AwsSecretKeyReference = NullIfWhiteSpace(request.AwsSecretKeyReference);
+            provider.AwsSessionTokenReference = NullIfWhiteSpace(request.AwsSessionTokenReference);
+            await db.SaveChangesAsync();
+            return Results.NoContent();
+        });
+
+        providers.MapDelete("/{id:guid}", async (Guid id, GovernanceDbContext db) =>
+        {
+            if (!await db.ModelProviders.AnyAsync(x => x.Id == id))
+            {
+                return Results.NotFound();
+            }
+
+            var routeIds = await db.ModelRoutes.Where(x => x.ProviderId == id).Select(x => x.Id).ToListAsync();
+            await db.ModelPermissions
+                .Where(x => x.ProviderId == id || (x.ModelRouteId != null && routeIds.Contains(x.ModelRouteId.Value)))
+                .ExecuteDeleteAsync();
+            await db.ModelRouteTargets
+                .Where(x => x.ProviderId == id || routeIds.Contains(x.ModelRouteId))
+                .ExecuteDeleteAsync();
+            await db.ModelRoutes.Where(x => x.ProviderId == id).ExecuteDeleteAsync();
+            await db.ModelProviders.Where(x => x.Id == id).ExecuteDeleteAsync();
+            return Results.NoContent();
+        });
+    }
+
+    private static void MapRoutes(RouteGroupBuilder routes)
+    {
+        routes.MapGet("/", async (GovernanceDbContext db) =>
+            Results.Ok(await db.ModelRoutes.AsNoTracking()
+                .OrderBy(x => x.PublicName)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.ProviderId,
+                    ProviderName = x.Provider.Name,
+                    ProviderSlug = x.Provider.Slug,
+                    ProviderKind = x.Provider.Kind,
+                    x.PublicName,
+                    x.DownstreamModel,
+                    x.Enabled,
+                    x.IsDefault,
+                    x.IsRoutingModel,
+                    x.Priority,
+                    x.Weight,
+                    x.ReasoningLevel,
+                    x.MaxContextTokens,
+                    x.MaxOutputTokens,
+                    x.SupportsTools,
+                    x.SupportsVision,
+                    x.SupportsJsonSchema,
+                    x.CostTier,
+                    x.LatencyTier,
+                    x.Specialties
+                })
+                .ToListAsync()));
+
+        routes.MapPost("/", async (CreateModelRouteRequest request, GovernanceDbContext db) =>
+        {
+            var validation = await ValidateRouteAsync(request, null, db);
+            if (validation is not null) return validation;
+
+            var route = new ModelRoute
+            {
+                ProviderId = request.ProviderId,
+                PublicName = request.PublicName.Trim(),
+                DownstreamModel = request.DownstreamModel.Trim(),
+                Enabled = request.Enabled,
+                IsDefault = request.IsDefault,
+                IsRoutingModel = request.IsRoutingModel,
+                Priority = request.Priority,
+                Weight = request.Weight,
+                ReasoningLevel = request.ReasoningLevel,
+                MaxContextTokens = request.MaxContextTokens,
+                MaxOutputTokens = request.MaxOutputTokens,
+                SupportsTools = request.SupportsTools,
+                SupportsVision = request.SupportsVision,
+                SupportsJsonSchema = request.SupportsJsonSchema,
+                CostTier = request.CostTier,
+                LatencyTier = request.LatencyTier,
+                Specialties = NullIfWhiteSpace(request.Specialties)
+            };
+            if (request.IsDefault)
+            {
+                await ClearOtherDefaultRoutesAsync(db, null);
+            }
+            if (request.IsRoutingModel)
+            {
+                await ClearOtherRoutingModelsAsync(db, null);
+            }
+            db.ModelRoutes.Add(route);
+            await db.SaveChangesAsync();
+            return Results.Created($"/admin/model-routes/{route.Id}", new { route.Id });
+        });
+
+        routes.MapPut("/{id:guid}", async (Guid id, CreateModelRouteRequest request, GovernanceDbContext db) =>
+        {
+            var route = await db.ModelRoutes.SingleOrDefaultAsync(x => x.Id == id);
+            if (route is null) return Results.NotFound();
+
+            var validation = await ValidateRouteAsync(request, id, db);
+            if (validation is not null) return validation;
+
+            route.ProviderId = request.ProviderId;
+            route.PublicName = request.PublicName.Trim();
+            route.DownstreamModel = request.DownstreamModel.Trim();
+            route.Enabled = request.Enabled;
+            route.IsDefault = request.IsDefault;
+            route.IsRoutingModel = request.IsRoutingModel;
+            route.Priority = request.Priority;
+            route.Weight = request.Weight;
+            route.ReasoningLevel = request.ReasoningLevel;
+            route.MaxContextTokens = request.MaxContextTokens;
+            route.MaxOutputTokens = request.MaxOutputTokens;
+            route.SupportsTools = request.SupportsTools;
+            route.SupportsVision = request.SupportsVision;
+            route.SupportsJsonSchema = request.SupportsJsonSchema;
+            route.CostTier = request.CostTier;
+            route.LatencyTier = request.LatencyTier;
+            route.Specialties = NullIfWhiteSpace(request.Specialties);
+            if (request.IsDefault)
+            {
+                await ClearOtherDefaultRoutesAsync(db, id);
+            }
+            if (request.IsRoutingModel)
+            {
+                await ClearOtherRoutingModelsAsync(db, id);
+            }
+            await db.SaveChangesAsync();
+            return Results.NoContent();
+        });
+
+        routes.MapDelete("/{id:guid}", async (Guid id, GovernanceDbContext db) =>
+        {
+            var affected = await db.ModelRoutes.Where(x => x.Id == id).ExecuteDeleteAsync();
+            return affected > 0 ? Results.NoContent() : Results.NotFound();
+        });
+    }
+
+    private static void MapRouteTargets(RouteGroupBuilder targets)
+    {
+        targets.MapGet("/", async (GovernanceDbContext db) =>
+            Results.Ok(await db.ModelRouteTargets.AsNoTracking()
+                .OrderBy(x => x.ModelRoute.PublicName)
+                .ThenBy(x => x.Priority)
+                .ThenBy(x => x.Provider.Name)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.ModelRouteId,
+                    ModelName = x.ModelRoute.PublicName,
+                    x.ProviderId,
+                    ProviderName = x.Provider.Name,
+                    ProviderSlug = x.Provider.Slug,
+                    ProviderKind = x.Provider.Kind,
+                    x.DownstreamModel,
+                    x.Priority,
+                    x.Weight,
+                    x.Enabled,
+                    x.ReasoningLevel,
+                    x.MaxContextTokens,
+                    x.MaxOutputTokens,
+                    x.SupportsTools,
+                    x.SupportsVision,
+                    x.SupportsJsonSchema,
+                    x.CostTier,
+                    x.LatencyTier,
+                    x.Specialties
+                })
+                .ToListAsync()));
+
+        targets.MapPost("/", async (CreateModelRouteTargetRequest request, GovernanceDbContext db) =>
+        {
+            var validation = await ValidateRouteTargetAsync(request, null, db);
+            if (validation is not null) return validation;
+
+            var target = new ModelRouteTarget
+            {
+                ModelRouteId = request.ModelRouteId,
+                ProviderId = request.ProviderId,
+                DownstreamModel = request.DownstreamModel.Trim(),
+                Priority = request.Priority,
+                Weight = request.Weight,
+                Enabled = request.Enabled,
+                ReasoningLevel = request.ReasoningLevel,
+                MaxContextTokens = request.MaxContextTokens,
+                MaxOutputTokens = request.MaxOutputTokens,
+                SupportsTools = request.SupportsTools,
+                SupportsVision = request.SupportsVision,
+                SupportsJsonSchema = request.SupportsJsonSchema,
+                CostTier = request.CostTier,
+                LatencyTier = request.LatencyTier,
+                Specialties = NullIfWhiteSpace(request.Specialties)
+            };
+            db.ModelRouteTargets.Add(target);
+            await db.SaveChangesAsync();
+            return Results.Created($"/admin/model-route-targets/{target.Id}", new { target.Id });
+        });
+
+        targets.MapPut("/{id:guid}", async (
+            Guid id,
+            CreateModelRouteTargetRequest request,
+            GovernanceDbContext db) =>
+        {
+            var target = await db.ModelRouteTargets.SingleOrDefaultAsync(x => x.Id == id);
+            if (target is null) return Results.NotFound();
+
+            var validation = await ValidateRouteTargetAsync(request, id, db);
+            if (validation is not null) return validation;
+
+            target.ModelRouteId = request.ModelRouteId;
+            target.ProviderId = request.ProviderId;
+            target.DownstreamModel = request.DownstreamModel.Trim();
+            target.Priority = request.Priority;
+            target.Weight = request.Weight;
+            target.Enabled = request.Enabled;
+            target.ReasoningLevel = request.ReasoningLevel;
+            target.MaxContextTokens = request.MaxContextTokens;
+            target.MaxOutputTokens = request.MaxOutputTokens;
+            target.SupportsTools = request.SupportsTools;
+            target.SupportsVision = request.SupportsVision;
+            target.SupportsJsonSchema = request.SupportsJsonSchema;
+            target.CostTier = request.CostTier;
+            target.LatencyTier = request.LatencyTier;
+            target.Specialties = NullIfWhiteSpace(request.Specialties);
+            await db.SaveChangesAsync();
+            return Results.NoContent();
+        });
+
+        targets.MapDelete("/{id:guid}", async (Guid id, GovernanceDbContext db) =>
+        {
+            var affected = await db.ModelRouteTargets.Where(x => x.Id == id).ExecuteDeleteAsync();
+            return affected > 0 ? Results.NoContent() : Results.NotFound();
+        });
+    }
+
+    private static void MapPermissions(RouteGroupBuilder permissions)
+    {
+        permissions.MapGet("/", async (GovernanceDbContext db) =>
+            Results.Ok(await db.ModelPermissions.AsNoTracking()
+                .OrderBy(x => x.Role.Name)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.RoleId,
+                    RoleName = x.Role.Name,
+                    x.Scope,
+                    x.ProviderId,
+                    ProviderName = x.Provider == null ? null : x.Provider.Name,
+                    x.ModelRouteId,
+                    ModelName = x.ModelRoute == null ? null : x.ModelRoute.PublicName
+                })
+                .ToListAsync()));
+
+        permissions.MapPost("/", async (CreateModelPermissionRequest request, GovernanceDbContext db) =>
+        {
+            if (!await db.Roles.AnyAsync(x => x.Id == request.RoleId))
+            {
+                return Results.NotFound("Role not found.");
+            }
+
+            Guid? providerId = null;
+            Guid? routeId = null;
+
+            if (request.Scope == ModelPermissionScope.Provider)
+            {
+                if (request.ProviderId is null ||
+                    !await db.ModelProviders.AnyAsync(x => x.Id == request.ProviderId.Value))
+                {
+                    return Results.BadRequest("ProviderId is required and must identify an existing provider.");
+                }
+                providerId = request.ProviderId;
+            }
+            else if (request.Scope == ModelPermissionScope.Route)
+            {
+                if (request.ModelRouteId is null ||
+                    !await db.ModelRoutes.AnyAsync(x => x.Id == request.ModelRouteId.Value))
+                {
+                    return Results.BadRequest("ModelRouteId is required and must identify an existing model route.");
+                }
+                routeId = request.ModelRouteId;
+            }
+            else
+            {
+                return Results.BadRequest("Unsupported model permission scope.");
+            }
+
+            var duplicate = await db.ModelPermissions.AnyAsync(x =>
+                x.RoleId == request.RoleId &&
+                x.Scope == request.Scope &&
+                x.ProviderId == providerId &&
+                x.ModelRouteId == routeId);
+            if (duplicate)
+            {
+                return Results.Conflict("That model permission already exists.");
+            }
+
+            var permission = new ModelPermission
+            {
+                RoleId = request.RoleId,
+                Scope = request.Scope,
+                ProviderId = providerId,
+                ModelRouteId = routeId
+            };
+            db.ModelPermissions.Add(permission);
+            await db.SaveChangesAsync();
+            return Results.Created($"/admin/model-permissions/{permission.Id}", new { permission.Id });
+        });
+
+        permissions.MapDelete("/{id:guid}", async (Guid id, GovernanceDbContext db) =>
+        {
+            var affected = await db.ModelPermissions.Where(x => x.Id == id).ExecuteDeleteAsync();
+            return affected > 0 ? Results.NoContent() : Results.NotFound();
+        });
+    }
+
+    private static async Task<IResult?> ValidateProviderAsync(
+        CreateModelProviderRequest request,
+        Guid? existingId,
+        GovernanceDbContext db)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name) ||
+            string.IsNullOrWhiteSpace(request.Slug) ||
+            !SafeSlugRegex().IsMatch(request.Slug.Trim()))
+        {
+            return Results.BadRequest("Name and a URL-safe slug are required.");
+        }
+
+        if (await db.ModelProviders.AnyAsync(x => x.Slug == request.Slug.Trim() && x.Id != existingId))
+        {
+            return Results.Conflict("Provider slug already exists.");
+        }
+
+        if (request.Kind != ModelProviderKind.AwsBedrock)
+        {
+            if (!Uri.TryCreate(request.BaseEndpoint, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                return Results.BadRequest("A valid HTTP/HTTPS BaseEndpoint is required.");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(request.BaseEndpoint) &&
+                 (!Uri.TryCreate(request.BaseEndpoint, UriKind.Absolute, out var bedrockUri) ||
+                  (bedrockUri.Scheme != Uri.UriSchemeHttp && bedrockUri.Scheme != Uri.UriSchemeHttps)))
+        {
+            return Results.BadRequest("BaseEndpoint must be HTTP/HTTPS when supplied.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.CredentialHeader))
+        {
+            return Results.BadRequest("CredentialHeader cannot be empty.");
+        }
+
+        return null;
+    }
+
+    private static async Task<IResult?> ValidateRouteAsync(
+        CreateModelRouteRequest request,
+        Guid? existingId,
+        GovernanceDbContext db)
+    {
+        var routingValidation = ValidateRoutingProfile(
+            request.Priority,
+            request.Weight,
+            request.ReasoningLevel,
+            request.MaxContextTokens,
+            request.MaxOutputTokens,
+            request.CostTier,
+            request.LatencyTier);
+        if (routingValidation is not null)
+        {
+            return routingValidation;
+        }
+
+        var provider = await db.ModelProviders.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == request.ProviderId);
+        if (provider is null)
+        {
+            return Results.BadRequest("ProviderId must identify an existing provider.");
+        }
+
+        if (request.IsDefault && request.IsRoutingModel)
+        {
+            return Results.BadRequest(
+                "The default intelligent router and its routing controller must be separate model routes.");
+        }
+
+        if (request.IsRoutingModel && provider.Kind == ModelProviderKind.GenericHttp)
+        {
+            return Results.BadRequest("The routing model must use a provider with a unified chat adapter.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.PublicName) || string.IsNullOrWhiteSpace(request.DownstreamModel))
+        {
+            return Results.BadRequest("PublicName and DownstreamModel are required.");
+        }
+
+        if (await db.ModelRoutes.AnyAsync(x => x.PublicName == request.PublicName.Trim() && x.Id != existingId))
+        {
+            return Results.Conflict("Public model name already exists.");
+        }
+
+        return null;
+    }
+
+    private static async Task<IResult?> ValidateRouteTargetAsync(
+        CreateModelRouteTargetRequest request,
+        Guid? existingId,
+        GovernanceDbContext db)
+    {
+        if (!await db.ModelRoutes.AnyAsync(x => x.Id == request.ModelRouteId))
+        {
+            return Results.BadRequest("ModelRouteId must identify an existing public model route.");
+        }
+
+        if (!await db.ModelProviders.AnyAsync(x => x.Id == request.ProviderId))
+        {
+            return Results.BadRequest("ProviderId must identify an existing provider.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.DownstreamModel))
+        {
+            return Results.BadRequest("DownstreamModel is required.");
+        }
+
+        var routingValidation = ValidateRoutingProfile(
+            request.Priority,
+            request.Weight,
+            request.ReasoningLevel,
+            request.MaxContextTokens,
+            request.MaxOutputTokens,
+            request.CostTier,
+            request.LatencyTier);
+        if (routingValidation is not null)
+        {
+            return routingValidation;
+        }
+
+        var downstream = request.DownstreamModel.Trim();
+        if (await db.ModelRouteTargets.AnyAsync(x =>
+                x.ModelRouteId == request.ModelRouteId &&
+                x.ProviderId == request.ProviderId &&
+                x.DownstreamModel == downstream &&
+                x.Id != existingId))
+        {
+            return Results.Conflict("That provider/model target is already configured for this route.");
+        }
+
+        var route = await db.ModelRoutes.AsNoTracking()
+            .SingleAsync(x => x.Id == request.ModelRouteId);
+        if (route.ProviderId == request.ProviderId &&
+            route.DownstreamModel == downstream)
+        {
+            return Results.Conflict("That provider/model pair is already the route's implicit primary target.");
+        }
+
+        return null;
+    }
+
+    private static IResult? ValidateRoutingProfile(
+        int priority,
+        int weight,
+        ModelReasoningLevel reasoningLevel,
+        int maxContextTokens,
+        int maxOutputTokens,
+        int costTier,
+        int latencyTier)
+    {
+        if (priority is < 0 or > 100000)
+        {
+            return Results.BadRequest("Priority must be between 0 and 100000.");
+        }
+
+        if (weight is < 1 or > 10000)
+        {
+            return Results.BadRequest("Weight must be between 1 and 10000.");
+        }
+
+        if (!Enum.IsDefined(reasoningLevel))
+        {
+            return Results.BadRequest("ReasoningLevel must be None, Low, Medium, or High.");
+        }
+
+        if (maxContextTokens is < 0 or > 10_000_000 ||
+            maxOutputTokens is < 0 or > 10_000_000)
+        {
+            return Results.BadRequest("Token limits must be between 0 and 10000000.");
+        }
+
+        if (costTier is < 0 or > 5 || latencyTier is < 0 or > 5)
+        {
+            return Results.BadRequest("CostTier and LatencyTier must be between 0 (unknown) and 5.");
+        }
+
+        return null;
+    }
+
+    private static async Task ClearOtherDefaultRoutesAsync(GovernanceDbContext db, Guid? exceptId)
+    {
+        var defaults = await db.ModelRoutes
+            .Where(x => x.IsDefault && (exceptId == null || x.Id != exceptId.Value))
+            .ToListAsync();
+        foreach (var route in defaults)
+        {
+            route.IsDefault = false;
+        }
+    }
+
+    private static async Task ClearOtherRoutingModelsAsync(GovernanceDbContext db, Guid? exceptId)
+    {
+        var routingModels = await db.ModelRoutes
+            .Where(x => x.IsRoutingModel && (exceptId == null || x.Id != exceptId.Value))
+            .ToListAsync();
+        foreach (var route in routingModels)
+        {
+            route.IsRoutingModel = false;
+        }
+    }
+
+    private static string? NullIfWhiteSpace(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}

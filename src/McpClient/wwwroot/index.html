@@ -189,38 +189,38 @@
             <div class="mb-4">
                 <label class="form-label">Inference source</label>
                 <div class="btn-group" role="group" aria-label="Inference source">
-                    <input class="btn-check" type="radio" name="llm-source" id="llm-source-proxy" value="Proxy" autocomplete="off" />
-                    <label class="btn btn-outline-primary" for="llm-source-proxy">Proxy</label>
+                    <input class="btn-check" type="radio" name="llm-source" id="llm-source-gateway" value="Gateway" autocomplete="off" />
+                    <label class="btn btn-outline-primary" for="llm-source-gateway">Gateway</label>
                     <input class="btn-check" type="radio" name="llm-source" id="llm-source-hosted" value="Hosted" autocomplete="off" />
                     <label class="btn btn-outline-primary" for="llm-source-hosted">Hosted</label>
                 </div>
-                <div class="form-text">Proxy tests the MCP Proxy OpenAI <code>/v1</code> control plane. Hosted calls the provider directly as a known-good comparison path.</div>
+                <div class="form-text">Gateway tests the AI Governance Gateway OpenAI <code>/v1</code> control plane. Hosted calls the provider directly as a known-good comparison path.</div>
             </div>
 
             <div class="row g-3">
                 <div class="col-lg-6">
-                    <div class="card h-100" id="llm-proxy-card">
+                    <div class="card h-100" id="llm-gateway-card">
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-center mb-3">
-                                <h2 class="h6 mb-0">Proxy model</h2>
-                                <span class="badge text-bg-primary d-none" id="llm-proxy-active">Active</span>
+                                <h2 class="h6 mb-0">Gateway model</h2>
+                                <span class="badge text-bg-primary d-none" id="llm-gateway-active">Active</span>
                             </div>
                             <div class="mb-3">
-                                <label class="form-label" for="llm-proxy-endpoint">Endpoint</label>
-                                <input class="form-control" id="llm-proxy-endpoint" type="url" placeholder="http://localhost:5105/v1" />
+                                <label class="form-label" for="llm-gateway-endpoint">Endpoint</label>
+                                <input class="form-control" id="llm-gateway-endpoint" type="url" placeholder="http://localhost:5105/v1" />
                             </div>
                             <div class="mb-3">
-                                <label class="form-label" for="llm-proxy-model">Public model alias</label>
+                                <label class="form-label" for="llm-gateway-model">Public model alias</label>
                                 <div class="input-group">
-                                    <input class="form-control" id="llm-proxy-model" list="llm-proxy-model-list" placeholder="fast-coder" />
-                                    <button class="btn btn-outline-secondary" type="button" id="load-proxy-models">Load models</button>
+                                    <input class="form-control" id="llm-gateway-model" list="llm-gateway-model-list" placeholder="fast-coder" />
+                                    <button class="btn btn-outline-secondary" type="button" id="load-gateway-models">Load models</button>
                                 </div>
-                                <datalist id="llm-proxy-model-list"></datalist>
+                                <datalist id="llm-gateway-model-list"></datalist>
                             </div>
                             <div>
-                                <label class="form-label" for="llm-proxy-apikey">Proxy API key or OAuth token <span class="text-secondary">(optional)</span></label>
-                                <input class="form-control" id="llm-proxy-apikey" type="password" autocomplete="off" placeholder="Blank uses your signed-in access token" />
-                                <div class="form-text">The value is sent as <code>Authorization: Bearer</code>. Use <code>mcp_...</code> for gateway API-key auth, paste an OAuth/OIDC access token to test bearer auth, or leave blank to reuse your current signed-in access token.</div>
+                                <label class="form-label" for="llm-gateway-apikey">Gateway API key or OAuth token <span class="text-secondary">(optional)</span></label>
+                                <input class="form-control" id="llm-gateway-apikey" type="password" autocomplete="off" placeholder="Blank uses your signed-in access token" />
+                                <div class="form-text">The value is sent as <code>Authorization: Bearer</code>. Use <code>aigw_...</code> for gateway API-key auth, paste an OAuth/OIDC access token to test bearer auth, or leave blank to reuse your current signed-in access token.</div>
                             </div>
                         </div>
                     </div>

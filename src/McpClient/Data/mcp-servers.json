@@ -1,7 +1,7 @@
 [
   {
     "id": "06164387fd914562b82fadeb7a6627b6",
-    "name": "MCP Proxy",
+    "name": "AI Governance Gateway",
     "description": null,
     "endpoint": "http://localhost:5105/mcp",
     "transportMode": "StreamableHttp",

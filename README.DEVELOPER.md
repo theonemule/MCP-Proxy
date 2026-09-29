@@ -1,4 +1,4 @@
-# MCP Proxy Developer Guide
+# AI Governance Gateway Developer Guide
 
 This guide is for contributors and maintainers. Start with [README.md](README.md) for product usage.
 
@@ -15,7 +15,7 @@ Related documentation:
 
 ~~~text
 src/
-  McpProxy/
+  AIGovernanceGateway/
     Admin/            administration and authentication endpoints
     Configuration/    database, cache, logging, and secret options
     Data/             EF entities and DbContext
@@ -30,7 +30,7 @@ src/
     Services/         LLM, MCP, token, conversation, and settings services
     wwwroot/          optional browser client
 tests/
-  McpProxy.Tests/
+  AIGovernanceGateway.Tests/
 ~~~
 
 Both applications target .NET 10.
@@ -41,7 +41,7 @@ The proxy uses ASP.NET Core, Entity Framework Core, Model Context Protocol .NET 
 
 Program.cs is composition-oriented. Major services include:
 
-- ProxyDbContext
+- GovernanceDbContext
 - PermissionService
 - DownstreamClientFactory
 - CatalogCache
@@ -49,6 +49,7 @@ Program.cs is composition-oriented. Major services include:
 - GatewayService
 - ModelRouterService
 - ModelRouteSelector
+- ModelRoutingDecisionService
 - OpenAiCompatibilityService
 - NativeModelProxyService
 
@@ -68,7 +69,7 @@ It chooses:
 
 The OpenAI /v1 surface uses OpenAiSmart. It avoids browser redirects and interprets OpenAI's bearer credential slot as either:
 
-- a gateway API key when it has the mcp_ format
+- a gateway API key when it has the aigw_ format
 - a JWT/OIDC bearer token otherwise
 
 OpenAiBearerCredentialClassifier only classifies the bearer value. JWT validity is still determined by ASP.NET bearer authentication.
@@ -178,7 +179,7 @@ ICatalogInvalidationBus has:
 Redis uses:
 
 ~~~text
-mcp-proxy:catalog-invalidated
+ai-governance-gateway:catalog-invalidated
 ~~~
 
 A refresh publishes the server ID. Receiving nodes reload the registered server from the shared database and refresh their local catalog without republishing.
@@ -245,44 +246,26 @@ A public name such as router or auto has no special parser behavior. It is intel
 
 ## Intelligent model selection
 
-ModelRoutingRequirements.Infer examines OpenAI-compatible request JSON.
+Intelligent routing now has two layers.
 
-The current heuristic inputs include:
+ModelRouteSelector first applies deterministic compatibility and health logic. It infers structural requirements from the OpenAI-compatible request, removes known-incompatible targets, excludes open-circuit targets when healthy alternatives exist, and produces a deterministic fallback order.
 
-- reasoning_effort
-- reasoning.effort
-- request text
-- approximate input token count
-- requested output tokens
-- tools
-- image inputs
-- JSON or JSON-Schema response formats
-- coarse task specialty
+ModelRoutingDecisionService then performs the semantic routing step when an enabled ModelRoute is marked IsRoutingModel.
 
-The current specialty vocabulary is:
+The routing controller receives a bounded text extraction of the request, the operation and token requirements, required tool/vision/JSON-Schema signals, and the eligible authorized candidates with their reasoning, context, output, feature, cost, latency, and Specialties metadata.
 
-- general
-- coding
-- math
-- vision
-- creative
-- summarization
+It is instructed to summarize the actual request intent, identify the primary inference task, judge the required reasoning level, compare that intent and task against only the supplied candidate metadata, and choose exactly one candidate in structured JSON.
 
-The selector hard-filters known incompatibilities and computes a suitability score.
+The chosen candidate moves to the front of the existing failover list. The remaining candidates retain their deterministic order.
 
-Ranking is:
+The routing model is invoked directly through ModelRouterService.ChatInternalAsync rather than through the intelligent router, so the routing decision cannot recurse.
 
-1. protocol compatibility and hard constraints
-2. suitability score
-3. administrative priority
-4. smooth weighted selection among exact suitability and priority ties
-5. failover order and circuit state
+The model-driven step is fail-open. If no routing model is configured, the routing model is unavailable, or its response cannot be parsed, the request uses the deterministic selector order.
 
-Reasoning deficits carry a much larger penalty than using a somewhat more capable model.
+Authorization filtering happens before the routing-model call, so the controller only sees candidates the caller is permitted to use.
 
-Simple work places more weight on cost and latency hints than high-reasoning work.
+ModelRoutingRequirements.Infer remains responsible for hard capability signals and fallback ranking. Its inputs include reasoning fields, approximate input/output size, tools, image inputs, JSON/JSON-Schema response formats, and coarse specialty hints.
 
-Unknown capability values remain eligible with a penalty for backward compatibility.
 
 ## Routing metadata
 
@@ -300,7 +283,7 @@ ModelRoute and ModelRouteTarget support:
 - LatencyTier
 - Specialties
 
-ModelRoute also has IsDefault.
+ModelRoute also has IsDefault and IsRoutingModel. IsDefault identifies the logical route used when a request omits model. IsRoutingModel identifies the separate chat-capable controller used to classify intent and choose among eligible inference targets. The admin API keeps at most one routing model active and prevents the same route from serving both roles.
 
 null capability booleans mean unknown.
 
@@ -444,7 +427,7 @@ The UI exposes common management and basic routing fields. Rich capability metad
 
 ## Data layer
 
-ProxyDbContext contains identity/RBAC, MCP server, and model-gateway entities.
+GovernanceDbContext contains identity/RBAC, MCP server, and model-gateway entities.
 
 Important uniqueness constraints include:
 
@@ -480,15 +463,15 @@ McpServerRegistry persists configured servers in Data/mcp-servers.json.
 
 LlmSettingsStore persists LLM profiles in Data/llm-settings.json.
 
-The client supports a direct Hosted profile and a Proxy profile.
+The client supports a direct Hosted profile and a Gateway profile.
 
-When the Proxy profile has no explicit credential, ChatService can supply the signed-in user's access token.
+When the Gateway profile has no explicit credential, ChatService can supply the signed-in user's access token.
 
 Conversation state is process-local and in memory.
 
 ## Administration UI
 
-src/McpProxy/wwwroot is a static administration SPA backed by /admin and /auth APIs.
+src/AIGovernanceGateway/wwwroot is a static administration SPA backed by /admin and /auth APIs.
 
 When changing the model UI, preserve rich route and target fields that are not editable in the basic form. Current handlers echo those values back during updates to avoid erasing API-configured metadata.
 
@@ -531,20 +514,26 @@ Program.cs clears the default providers and selects one of:
 
 MinimumLevel uses normal .NET logging levels.
 
-Do not add password, token, complete API-key, provider-secret, or raw Authorization logging.
+GatewayTelemetry is the structured event layer. Keep transport capture in GatewayTelemetryMiddleware and GatewayTelemetryHttpHandler, and keep domain-specific events close to the MCP/model operation that knows their meaning. Do not introduce a telemetry database dependency into request routing.
+
+GuardrailService uses a configured model route as an internal classifier. It must continue to call ModelRouterService.ChatInternalAsync rather than the public model surface so governance evaluation cannot recurse through routing or middleware.
+
+Output guardrails buffer governed responses until the decision is known. Preserve that invariant when changing streaming code: content that will be refused must not be partially emitted first.
+
+Do not add password, token, complete API-key, provider-secret, cookie, raw Authorization, or other credential logging. Extend the sanitizer/configurable redaction lists when new credential-shaped fields are introduced.
 
 ## Build and test
 
 ~~~bash
-dotnet restore McpProxy.slnx
-dotnet build McpProxy.slnx
-dotnet test McpProxy.slnx
+dotnet restore AIGovernanceGateway.slnx
+dotnet build AIGovernanceGateway.slnx
+dotnet test AIGovernanceGateway.slnx
 ~~~
 
 When the host does not have .NET 10:
 
 ~~~bash
-docker run --rm   -v "$PWD:/src"   -w /src   mcr.microsoft.com/dotnet/sdk:10.0   dotnet test McpProxy.slnx -c Release --nologo
+docker run --rm   -v "$PWD:/src"   -w /src   mcr.microsoft.com/dotnet/sdk:10.0   dotnet test AIGovernanceGateway.slnx -c Release --nologo
 ~~~
 
 The suite covers identity, RBAC, configuration, MCP behavior, model authorization, OpenAI compatibility, provider adaptation, routing selection, failover behavior, bearer-slot credential classification, Bedrock signing/streaming, and schema upgrades.
@@ -562,6 +551,8 @@ When changing model routing, preserve these behaviors:
 - unauthorized secondary targets are removed
 - streaming does not fail over after output starts
 - old routes with unknown capability metadata remain usable
+- model selection and failover continue to emit structured telemetry
+- guardrail evaluator calls do not recursively enter model-driven routing
 
 ## Security invariants
 
@@ -576,6 +567,8 @@ Do not regress these boundaries:
 - provider error internals are not blindly reflected northbound
 - downstream MCP and model credential headers reject unsafe reserved headers
 - admin scopes are enforced server-side
+- telemetry redacts credentials before emission
+- guarded output is not released before an allow decision
 
 ## Extension points
 

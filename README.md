@@ -1,8 +1,8 @@
-# MCP Proxy
+# AI Governance Gateway
 
 > **Beta:** the project is usable, but interfaces and operational behavior may still change. Issues and pull requests are welcome.
 
-MCP Proxy is a .NET 10 gateway for two related workloads:
+AI Governance Gateway is a .NET 10 governance enforcement point for AI models, agents, and MCP traffic. It centralizes authentication, authorization, policy guardrails, intelligent model routing, telemetry, and provider abstraction across two related workloads:
 
 1. **Model Context Protocol aggregation and governance**. It exposes tools, resources, and prompts from multiple downstream MCP servers through one protected endpoint.
 2. **AI model gateway and intelligent routing**. It exposes an OpenAI-compatible /v1 API in front of OpenAI-compatible providers, Ollama, AWS Bedrock, and native HTTP providers.
@@ -22,10 +22,10 @@ The repository also contains an optional browser client for OIDC sign-in, AI cha
 
 ## Repository layout
 
-- src/McpProxy is the shared gateway, administration application, MCP proxy, model gateway, and intelligent router.
+- src/AIGovernanceGateway is the shared gateway, administration application, MCP proxy, model gateway, and intelligent router.
 - src/McpClient is the optional OIDC browser client and AI/MCP chat application.
-- tests/McpProxy.Tests contains the automated test suite.
-- McpProxy.slnx contains both applications and the tests.
+- tests/AIGovernanceGateway.Tests contains the automated test suite.
+- AIGovernanceGateway.slnx contains both applications and the tests.
 
 ## Northbound interfaces
 
@@ -50,9 +50,9 @@ You need the .NET 10 SDK. Docker is optional. OIDC is optional for local develop
 ### Build and test
 
 ~~~bash
-dotnet restore McpProxy.slnx
-dotnet build McpProxy.slnx
-dotnet test McpProxy.slnx
+dotnet restore AIGovernanceGateway.slnx
+dotnet build AIGovernanceGateway.slnx
+dotnet test AIGovernanceGateway.slnx
 ~~~
 
 ### Start the proxy locally
@@ -62,7 +62,7 @@ The default local database is SQLite.
 ~~~bash
 export Bootstrap__AdminUsername=admin
 export Bootstrap__AdminPassword='replace-this'
-dotnet run --project src/McpProxy --launch-profile http
+dotnet run --project src/AIGovernanceGateway --launch-profile http
 ~~~
 
 PowerShell:
@@ -70,7 +70,7 @@ PowerShell:
 ~~~powershell
 $env:Bootstrap__AdminUsername = "admin"
 $env:Bootstrap__AdminPassword = "replace-this"
-dotnet run --project src/McpProxy --launch-profile http
+dotnet run --project src/AIGovernanceGateway --launch-profile http
 ~~~
 
 The default development URL is:
@@ -234,7 +234,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://gateway.example/v1",
-    api_key="mcp_<prefix>.<secret>",
+    api_key="aigw_<prefix>.<secret>",
 )
 
 response = client.chat.completions.create(
@@ -247,7 +247,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ~~~
 
-The same /v1 surface can authenticate with an OIDC/JWT access token placed in the OpenAI SDK api_key field. Gateway-generated keys begin with mcp_. Any other non-empty bearer value is handled by JWT/OIDC bearer authentication.
+The same /v1 surface can authenticate with an OIDC/JWT access token placed in the OpenAI SDK api_key field. Gateway-generated keys begin with aigw_. Any other non-empty bearer value is handled by JWT/OIDC bearer authentication.
 
 This preserves the normal OpenAI wire format:
 
@@ -336,12 +336,12 @@ OIDC authentication alone does not automatically grant proxy permissions. Extern
 
 ## API keys
 
-Proxy API keys are generated once and displayed once. The database stores the public prefix and a hash of the secret, not the plaintext key.
+Gateway API keys are generated once and displayed once. The database stores the public prefix and a hash of the secret, not the plaintext key.
 
 A generated key has the form:
 
 ~~~text
-mcp_<prefix>.<secret>
+aigw_<prefix>.<secret>
 ~~~
 
 Assign roles to the API key the same way you assign roles to a user.
@@ -358,7 +358,7 @@ For OIDC mode, configure at minimum:
     "Authority": "https://login.microsoftonline.com/<tenant>/v2.0",
     "Audience": "api://<proxy-app-id>",
     "ClientId": "<proxy-app-id>",
-    "ClientSecret": "env:MCP_PROXY_OIDC_CLIENT_SECRET",
+    "ClientSecret": "env:AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET",
     "RequireHttpsMetadata": true
   }
 }
@@ -431,14 +431,14 @@ Model routing health and smooth weighted-selection state are also process-local.
 
 ## Docker Compose
 
-The repository includes a Compose profile with MCP Proxy, PostgreSQL, and Redis.
+The repository includes a Compose profile with AI Governance Gateway, PostgreSQL, and Redis.
 
 Set the required values:
 
 ~~~bash
 export POSTGRES_PASSWORD='replace-this'
 export BOOTSTRAP_ADMIN_PASSWORD='replace-this'
-export MCP_PROXY_OIDC_CLIENT_SECRET='replace-this'
+export AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET='replace-this'
 docker compose up --build -d
 ~~~
 
@@ -452,7 +452,7 @@ Useful commands:
 
 ~~~bash
 docker compose ps
-docker compose logs -f proxy
+docker compose logs -f gateway
 docker compose down
 ~~~
 
@@ -479,15 +479,15 @@ The primary proxy settings are:
     "Authority": "...",
     "Audience": "...",
     "ClientId": "...",
-    "ClientSecret": "env:MCP_PROXY_OIDC_CLIENT_SECRET",
+    "ClientSecret": "env:AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET",
     "RequireHttpsMetadata": true,
     "ApiKeysEnabled": true,
     "ApiKeyHeaderName": "X-Api-Key"
   },
   "Database": {
     "Provider": "Sqlite",
-    "ConnectionString": "Data Source=mcp-proxy.db",
-    "SqliteConnectionString": "Data Source=mcp-proxy.db",
+    "ConnectionString": "Data Source=ai-governance-gateway.db",
+    "SqliteConnectionString": "Data Source=ai-governance-gateway.db",
     "SqlServerConnectionString": "",
     "PostgresConnectionString": ""
   },
@@ -499,7 +499,28 @@ The primary proxy settings are:
   },
   "LoggingOptions": {
     "Provider": "Console",
-    "MinimumLevel": "Information"
+    "MinimumLevel": "Information",
+    "TelemetryEnabled": true,
+    "CaptureRequestBodies": true,
+    "CaptureResponseBodies": true,
+    "CaptureHeaders": true,
+    "MaxPayloadBytes": 1048576,
+    "CaptureBinaryBodies": false,
+    "RedactedHeaders": [],
+    "RedactedJsonFields": []
+  },
+  "Guardrails": {
+    "Enabled": false,
+    "EvaluateInputs": true,
+    "EvaluateOutputs": true,
+    "Model": "guardrail-model",
+    "PolicyPrompt": "Apply the organization's acceptable-use and data-handling policy.",
+    "BlockThreshold": 70,
+    "MaxEvaluationBytes": 262144,
+    "BlockOversizedInputs": true,
+    "MaxBufferedResponseBytes": 4194304,
+    "BlockOversizedResponses": true,
+    "FailureMode": "Allow"
   },
   "Bootstrap": {
     "AdminUsername": "admin",
@@ -545,6 +566,20 @@ Built-in logging provider choices are:
 
 LoggingOptions.MinimumLevel is parsed as a normal .NET LogLevel.
 
+Structured proxy telemetry is emitted through the same ILogger pipeline under the AIGovernanceGateway.Telemetry.GatewayTelemetry category. The proxy does not create a telemetry database. Console, Debug, EventSource, or any future ILogger provider can receive the same events.
+
+When telemetry is enabled, the proxy records northbound HTTP requests and responses, downstream MCP/model HTTP exchanges, MCP tool/resource/prompt operations, model selection and failover, model-driven routing intent/task/rationale, timings, status codes, payload sizes, correlation IDs, and guardrail decisions. Request and response bodies are captured up to MaxPayloadBytes. Authentication headers, cookies, password/token/credential-shaped JSON fields, and configured custom fields are redacted.
+
+X-Correlation-ID is accepted from callers by default and is returned on the response. Disable AcceptInboundCorrelationId if correlation IDs must always be generated by the proxy.
+
+### Model-based guardrails
+
+Guardrails is an optional governance layer over /mcp, /servers, /models, and /v1 by default. Set Enabled to true and set Model to an enabled model route. The evaluator is invoked internally, not through the public HTTP surface, so it cannot recursively trigger the guardrail middleware.
+
+Inputs are evaluated before routing. Governed outputs are buffered and evaluated before release, including streaming responses. If the evaluator returns action=block or a risk_score at or above BlockThreshold, the proxy returns a guardrail_refusal error instead of forwarding the content.
+
+The evaluator prompt is policy-driven and configurable through PolicyPrompt. FailureMode controls fail-open (Allow) versus fail-closed (Block) behavior if the evaluator is unavailable or returns an invalid decision. Oversized governed payloads can be refused instead of partially evaluated.
+
 SyslogHost, SyslogPort, Preset, and ApplicationName exist in the configuration model, but the current startup path does not yet implement a syslog provider.
 
 ## Browser client
@@ -554,7 +589,7 @@ The optional McpClient application supports:
 - OIDC sign-in
 - multiple MCP server configurations
 - OpenAI-compatible hosted inference
-- the local MCP Proxy /v1 endpoint as an inference source
+- the local AI Governance Gateway /v1 endpoint as an inference source
 - model discovery
 - MCP tools in the LLM tool loop
 - resource reading
@@ -563,9 +598,9 @@ The optional McpClient application supports:
 The client has two LLM profiles:
 
 - Hosted
-- Proxy
+- Gateway
 
-When the active Proxy profile has an explicit credential, that value is sent as the OpenAI bearer credential. When the field is blank, the client reuses the signed-in user's access token.
+When the active Gateway profile has an explicit credential, that value is sent as the OpenAI bearer credential. When the field is blank, the client reuses the signed-in user's access token.
 
 ## Troubleshooting
 

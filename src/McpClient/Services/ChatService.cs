@@ -30,10 +30,10 @@ public sealed partial class ChatService(
     {
         var llm = llmSettings.Get();
         var connection = llm.ActiveConnection;
-        var proxyAccessToken = llm.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(connection.ApiKey)
+        var gatewayAccessToken = llm.Source == LlmSource.Gateway && string.IsNullOrWhiteSpace(connection.ApiKey)
             ? await tokenProvider.GetTokenAsync(ForwardedToken.AccessToken)
             : null;
-        var chatClient = llmClientFactory.Create(llm, proxyAccessToken);
+        var chatClient = llmClientFactory.Create(llm, gatewayAccessToken);
 
         await using var connections = await sessionFactory.ConnectAllAsync(cancellationToken);
 
@@ -78,7 +78,7 @@ public sealed partial class ChatService(
             var activeServers = connections.Sessions.Select(s => $"{s.Options.Name} ({s.Options.Endpoint})").ToList();
             logger.LogError(ex,
                 "LLM call failed. Endpoint={Endpoint}, Model={Model}, ApiKeyStatus={ApiKeyStatus}, ActiveServers={ActiveServers}",
-                connection.Endpoint, connection.Model, MaskCredential(connection.ApiKey, proxyAccessToken), string.Join(", ", activeServers));
+                connection.Endpoint, connection.Model, MaskCredential(connection.ApiKey, gatewayAccessToken), string.Join(", ", activeServers));
 
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("LLM Request Failed!");
@@ -87,7 +87,7 @@ public sealed partial class ChatService(
             sb.AppendLine($"• LLM Source:         {llm.Source}");
             sb.AppendLine($"• LLM Endpoint:       {connection.Endpoint}");
             sb.AppendLine($"• Model / Deployment: {connection.Model}");
-            sb.AppendLine($"• Credential Status:  {MaskCredential(connection.ApiKey, proxyAccessToken)}");
+            sb.AppendLine($"• Credential Status:  {MaskCredential(connection.ApiKey, gatewayAccessToken)}");
             sb.AppendLine($"• Max Tool Iterations:{llm.MaxToolIterations}");
             sb.AppendLine($"• History Messages:   {snapshot.Count}");
             sb.AppendLine($"• Active MCP Servers: {(activeServers.Count > 0 ? string.Join(", ", activeServers) : "None")}");
@@ -269,18 +269,18 @@ public sealed partial class ChatService(
         return records;
     }
 
-    private static string MaskCredential(string? apiKey, string? proxyAccessToken)
+    private static string MaskCredential(string? apiKey, string? gatewayAccessToken)
     {
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            var kind = apiKey.StartsWith("mcp_", StringComparison.Ordinal)
+            var kind = apiKey.StartsWith("aigw_", StringComparison.Ordinal)
                 ? "Gateway API key"
                 : "Bearer credential";
             if (apiKey.Length <= 8) return $"{kind} configured ({apiKey[..Math.Min(2, apiKey.Length)]}***, Length: {apiKey.Length})";
             return $"{kind} configured ({apiKey[..4]}...{apiKey[^4..]}, Length: {apiKey.Length})";
         }
 
-        return string.IsNullOrWhiteSpace(proxyAccessToken)
+        return string.IsNullOrWhiteSpace(gatewayAccessToken)
             ? "NOT CONFIGURED"
             : "Using signed-in user's access token";
     }

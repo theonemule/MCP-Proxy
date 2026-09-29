@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 namespace McpClient.Services;
 
 /// <summary>
-/// Persists switchable proxy/hosted LLM settings so the client can test the model gateway against
+/// Persists switchable gateway/hosted LLM settings so the client can test the model gateway against
 /// a known-good direct provider without editing files or restarting.
 /// </summary>
 public sealed class LlmSettingsStore
@@ -61,7 +61,7 @@ public sealed class LlmSettingsStore
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
 
-            // Before proxy/hosted profiles were introduced, endpoint/apiKey/model lived at the root.
+            // Before gateway/hosted profiles were introduced, endpoint/apiKey/model lived at the root.
             // Treat that existing configuration as the hosted profile so upgrades are non-destructive.
             if (root.TryGetProperty("endpoint", out var endpoint) &&
                 !root.TryGetProperty("hosted", out _))
@@ -117,7 +117,7 @@ public sealed class LlmSettingsStore
     private static LlmOptions Clone(LlmOptions settings) => new()
     {
         Source = settings.Source,
-        Proxy = CloneConnection(settings.Proxy),
+        Gateway = CloneConnection(settings.Gateway),
         Hosted = CloneConnection(settings.Hosted),
         SystemPrompt = settings.SystemPrompt,
         Temperature = settings.Temperature,

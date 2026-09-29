@@ -9,9 +9,9 @@ When authentication is enabled, most proxy routes require an authenticated princ
 Common API credential presentations are:
 
 ~~~text
-X-Api-Key: mcp_<prefix>.<secret>
+X-Api-Key: aigw_<prefix>.<secret>
 Authorization: Bearer <JWT-or-OIDC-token>
-Authorization: Bearer mcp_<prefix>.<secret>
+Authorization: Bearer aigw_<prefix>.<secret>
 ~~~
 
 The last form is primarily for OpenAI-compatible clients that always place the configured API credential in the Bearer slot.
@@ -164,6 +164,7 @@ publicName
 downstreamModel
 enabled
 isDefault
+isRoutingModel
 priority
 weight
 reasoningLevel
@@ -360,6 +361,26 @@ The /v1 surface returns errors in an OpenAI-compatible shape:
 ~~~
 
 Provider implementation details are not treated as a stable northbound error contract.
+
+When model-based guardrails refuse an input or output, the proxy returns an HTTP refusal status (403 by default) with an error envelope that keeps the OpenAI-style message/type/param/code fields and adds governance details:
+
+~~~json
+{
+  "error": {
+    "message": "Policy-grounded refusal reason.",
+    "type": "guardrail_refusal",
+    "param": null,
+    "code": "guardrail_refusal",
+    "stage": "input",
+    "risk_score": 92,
+    "categories": ["restricted"],
+    "evaluation_failed": false,
+    "correlation_id": "..."
+  }
+}
+~~~
+
+The same proxy-level refusal format can appear on governed MCP, /models, and native data-plane paths. The correlation ID is also returned in X-Correlation-ID.
 
 ## Legacy normalized model API
 

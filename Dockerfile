@@ -3,11 +3,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY ["src/McpProxy/McpProxy.csproj", "src/McpProxy/"]
-RUN dotnet restore "src/McpProxy/McpProxy.csproj"
+COPY ["src/AIGovernanceGateway/AIGovernanceGateway.csproj", "src/AIGovernanceGateway/"]
+RUN dotnet restore "src/AIGovernanceGateway/AIGovernanceGateway.csproj"
 
 COPY . .
-RUN dotnet publish "src/McpProxy/McpProxy.csproj" \
+RUN dotnet publish "src/AIGovernanceGateway/AIGovernanceGateway.csproj" \
     --configuration Release \
     --output /app/publish \
     --no-restore \
@@ -25,4 +25,4 @@ EXPOSE 8080
 COPY --from=build /app/publish .
 
 USER $APP_UID
-ENTRYPOINT ["dotnet", "McpProxy.dll"]
+ENTRYPOINT ["dotnet", "AIGovernanceGateway.dll"]

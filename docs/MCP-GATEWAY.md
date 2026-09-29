@@ -124,7 +124,7 @@ With memory-only operation, every proxy node owns its own catalog.
 With Redis enabled, a successful refresh publishes the registered server ID on:
 
 ~~~text
-mcp-proxy:catalog-invalidated
+ai-governance-gateway:catalog-invalidated
 ~~~
 
 Other nodes then reload the server registration from the shared database and refresh their own local cache.
@@ -176,7 +176,7 @@ Browser cookies are part of the general application authentication system but pr
 A gateway API key can normally be sent in:
 
 ~~~text
-X-Api-Key: mcp_<prefix>.<secret>
+X-Api-Key: aigw_<prefix>.<secret>
 ~~~
 
 ## Authorization model

@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/McpClient/McpClient.csproj" />
-    <Project Path="src/McpProxy/McpProxy.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/McpProxy.Tests/McpProxy.Tests.csproj" />
-  </Folder>
-</Solution>

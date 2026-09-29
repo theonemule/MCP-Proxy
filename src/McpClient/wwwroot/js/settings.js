@@ -12,16 +12,16 @@ export function renderSettings(view) {
 
     function updateActiveState() {
         const source = sourceValue();
-        view.querySelector('#llm-proxy-active').classList.toggle('d-none', source !== 'Proxy');
+        view.querySelector('#llm-gateway-active').classList.toggle('d-none', source !== 'Gateway');
         view.querySelector('#llm-hosted-active').classList.toggle('d-none', source !== 'Hosted');
-        view.querySelector('#llm-proxy-card').classList.toggle('border-primary', source === 'Proxy');
+        view.querySelector('#llm-gateway-card').classList.toggle('border-primary', source === 'Gateway');
         view.querySelector('#llm-hosted-card').classList.toggle('border-primary', source === 'Hosted');
 
-        const endpoint = source === 'Proxy'
-            ? view.querySelector('#llm-proxy-endpoint').value
+        const endpoint = source === 'Gateway'
+            ? view.querySelector('#llm-gateway-endpoint').value
             : view.querySelector('#llm-hosted-endpoint').value;
-        const model = source === 'Proxy'
-            ? view.querySelector('#llm-proxy-model').value
+        const model = source === 'Gateway'
+            ? view.querySelector('#llm-gateway-model').value
             : view.querySelector('#llm-hosted-model').value;
 
         view.querySelector('#llm-active-summary').textContent =
@@ -44,7 +44,7 @@ export function renderSettings(view) {
 
         return {
             source: sourceValue(),
-            proxy: connectionSettings('Proxy'),
+            gateway: connectionSettings('Gateway'),
             hosted: connectionSettings('Hosted'),
             systemPrompt: view.querySelector('#llm-system-prompt').value || null,
             temperature: temperature === '' ? null : Number(temperature),
@@ -56,19 +56,19 @@ export function renderSettings(view) {
     async function load() {
         try {
             const settings = (await api('/api/llm-settings')) || {};
-            const proxy = settings.proxy ?? {};
+            const gateway = settings.gateway ?? {};
             const hosted = settings.hosted ?? {};
 
             const source = settings.source ?? 'Hosted';
             const sourceInput = view.querySelector('#llm-source-' + source.toLowerCase());
             if (sourceInput) sourceInput.checked = true;
 
-            view.querySelector('#llm-proxy-endpoint').value = proxy.endpoint ?? 'http://localhost:5105/v1';
-            view.querySelector('#llm-proxy-model').value = proxy.model ?? '';
-            view.querySelector('#llm-proxy-apikey').value = '';
-            view.querySelector('#llm-proxy-apikey').placeholder = proxy.apiKeyConfigured
+            view.querySelector('#llm-gateway-endpoint').value = gateway.endpoint ?? 'http://localhost:5105/v1';
+            view.querySelector('#llm-gateway-model').value = gateway.model ?? '';
+            view.querySelector('#llm-gateway-apikey').value = '';
+            view.querySelector('#llm-gateway-apikey').placeholder = gateway.apiKeyConfigured
                 ? 'Configured - leave blank to keep'
-                : 'mcp_ key, OAuth access token, or blank for signed-in token';
+                : 'aigw_ key, OAuth access token, or blank for signed-in token';
 
             view.querySelector('#llm-hosted-endpoint').value = hosted.endpoint ?? '';
             view.querySelector('#llm-hosted-model').value = hosted.model ?? '';
@@ -138,13 +138,13 @@ export function renderSettings(view) {
 
     sourceInputs.forEach(input => input.addEventListener('change', updateActiveState));
     [
-        '#llm-proxy-endpoint',
-        '#llm-proxy-model',
+        '#llm-gateway-endpoint',
+        '#llm-gateway-model',
         '#llm-hosted-endpoint',
         '#llm-hosted-model'
     ].forEach(selector => view.querySelector(selector).addEventListener('input', updateActiveState));
 
-    view.querySelector('#load-proxy-models').addEventListener('click', () => loadModels('Proxy'));
+    view.querySelector('#load-gateway-models').addEventListener('click', () => loadModels('Gateway'));
     view.querySelector('#load-hosted-models').addEventListener('click', () => loadModels('Hosted'));
 
     form.addEventListener('submit', async event => {

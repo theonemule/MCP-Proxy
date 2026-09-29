@@ -1,6 +1,6 @@
 # Operations Guide
 
-This guide covers deployment, configuration, scaling, secrets, backup, and troubleshooting for MCP Proxy.
+This guide covers deployment, configuration, scaling, secrets, backup, and troubleshooting for AI Governance Gateway.
 
 ## Runtime requirements
 
@@ -37,7 +37,7 @@ Example:
 ~~~bash
 export Bootstrap__AdminUsername=admin
 export Bootstrap__AdminPassword='replace-this'
-dotnet run --project src/McpProxy --launch-profile http
+dotnet run --project src/AIGovernanceGateway --launch-profile http
 ~~~
 
 The normal local URL is:
@@ -50,7 +50,7 @@ http://localhost:5105
 
 The included Compose profile runs:
 
-- MCP Proxy
+- AI Governance Gateway
 - PostgreSQL
 - Redis
 
@@ -59,7 +59,7 @@ Required environment variables are:
 ~~~text
 POSTGRES_PASSWORD
 BOOTSTRAP_ADMIN_PASSWORD
-MCP_PROXY_OIDC_CLIENT_SECRET
+AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET
 ~~~
 
 Optional variables include:
@@ -79,7 +79,7 @@ Inspect:
 
 ~~~bash
 docker compose ps
-docker compose logs -f proxy
+docker compose logs -f gateway
 ~~~
 
 Stop:
@@ -106,8 +106,8 @@ The configuration section is:
 {
   "Database": {
     "Provider": "Sqlite",
-    "ConnectionString": "Data Source=mcp-proxy.db",
-    "SqliteConnectionString": "Data Source=mcp-proxy.db",
+    "ConnectionString": "Data Source=ai-governance-gateway.db",
+    "SqliteConnectionString": "Data Source=ai-governance-gateway.db",
     "SqlServerConnectionString": "",
     "PostgresConnectionString": ""
   }
@@ -126,7 +126,7 @@ Environment configuration uses normal .NET double-underscore notation:
 
 ~~~text
 Database__Provider=Postgres
-Database__PostgresConnectionString=Host=db;Database=mcp_proxy;Username=...;Password=...
+Database__PostgresConnectionString=Host=db;Database=ai_governance_gateway;Username=...;Password=...
 ~~~
 
 Use PostgreSQL or SQL Server for a multi-node deployment with shared durable state.
@@ -177,7 +177,7 @@ Redis currently provides:
 The invalidation channel is:
 
 ~~~text
-mcp-proxy:catalog-invalidated
+ai-governance-gateway:catalog-invalidated
 ~~~
 
 Redis does not currently distribute:
@@ -228,7 +228,7 @@ Auth__Mode=Oidc
 Auth__Authority=https://...
 Auth__Audience=api://...
 Auth__ClientId=...
-Auth__ClientSecret=env:MCP_PROXY_OIDC_CLIENT_SECRET
+Auth__ClientSecret=env:AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET
 Auth__RequireHttpsMetadata=true
 ~~~
 
@@ -259,7 +259,7 @@ X-Api-Key
 Gateway API keys can also be used in the OpenAI bearer slot:
 
 ~~~text
-Authorization: Bearer mcp_<prefix>.<secret>
+Authorization: Bearer aigw_<prefix>.<secret>
 ~~~
 
 The complete key is displayed when created. The database later contains only the public prefix and a hash of the secret.
@@ -273,7 +273,7 @@ The current secret-provider implementation reads environment variables.
 Use references such as:
 
 ~~~text
-env:MCP_PROXY_OIDC_CLIENT_SECRET
+env:AI_GOVERNANCE_GATEWAY_OIDC_CLIENT_SECRET
 env:FOUNDRY_API_KEY
 env:GITHUB_TOKEN
 ~~~
@@ -342,7 +342,32 @@ Configuration example:
   "LoggingOptions": {
     "Provider": "Console",
     "MinimumLevel": "Information",
-    "ApplicationName": "mcp-proxy"
+    "ApplicationName": "ai-governance-gateway",
+    "TelemetryEnabled": true,
+    "CaptureRequestBodies": true,
+    "CaptureResponseBodies": true,
+    "CaptureHeaders": true,
+    "MaxPayloadBytes": 1048576,
+    "CaptureBinaryBodies": false,
+    "AcceptInboundCorrelationId": true,
+    "RedactedHeaders": [],
+    "RedactedJsonFields": []
+  },
+  "Guardrails": {
+    "Enabled": false,
+    "EvaluateInputs": true,
+    "EvaluateOutputs": true,
+    "Model": "guardrail-model",
+    "PolicyPrompt": "Apply the organization's acceptable-use and data-handling policy.",
+    "BlockThreshold": 70,
+    "MaxEvaluationBytes": 262144,
+    "BlockOversizedInputs": true,
+    "MaxBufferedResponseBytes": 4194304,
+    "BlockOversizedResponses": true,
+    "FailureMode": "Allow",
+    "InputRefusalStatusCode": 403,
+    "OutputRefusalStatusCode": 403,
+    "PathPrefixes": ["/mcp", "/servers", "/models", "/v1"]
   }
 }
 ~~~
@@ -358,17 +383,53 @@ None
 
 The application clears the default logging providers before selecting the configured provider.
 
+Structured telemetry is sink-neutral and is emitted through ILogger under the AIGovernanceGateway.Telemetry.GatewayTelemetry category. No telemetry table or application database dependency is introduced. A future file, syslog, OpenTelemetry, SIEM, Seq, ELK, Application Insights, or other ILogger provider can consume the same events.
+
+High-value event names include:
+
+- http.request and http.response for northbound traffic
+- http.downstream.request and http.downstream.response for provider/MCP traffic
+- mcp.tool.*, mcp.resource.*, and mcp.prompt.* for semantic MCP operations
+- model.route.selected, model.routing.decision, model.route.failover, and model.route.success
+- guardrail.evaluation, guardrail.blocked, and guardrail.error
+
+Request and response bodies are captured up to MaxPayloadBytes. Text and JSON are logged as content, while binary bodies default to metadata-only unless CaptureBinaryBodies is enabled. Authorization/cookie headers and credential-shaped JSON properties are redacted recursively. Add organization-specific names to RedactedHeaders and RedactedJsonFields.
+
+Every data-plane request receives an X-Correlation-ID response header. The gateway reuses a caller-supplied X-Correlation-ID by default so logs across clients, AI Governance Gateway, model providers, and downstream MCP servers can be joined.
+
 Preset, SyslogHost, SyslogPort, and ApplicationName exist in the options model, but the current startup code does not implement a syslog sink.
 
 Never log:
 
 - passwords
-- complete proxy API keys
+- complete gateway API keys
 - raw Authorization headers
 - OIDC access or ID tokens
 - downstream MCP credentials
 - model-provider credentials
 - database passwords
+
+## Guardrails
+
+Guardrails use an enabled model route as a policy classifier around the proxy data plane. They are disabled by default.
+
+Input evaluation occurs after authentication/authorization middleware and before MCP/model routing. Output evaluation occurs before governed response bytes are released to the caller. Because output policy must be decided first, governed streaming responses are buffered and then released or replaced with a refusal.
+
+The evaluator receives:
+
+- whether it is rating an input or output
+- sanitized request/response metadata
+- the captured content
+- the configured PolicyPrompt
+- an instruction to treat the captured content as untrusted data and return only a structured decision
+
+The evaluator returns risk_score, action, reason, and categories. Content is refused when action is block or risk_score is greater than or equal to BlockThreshold.
+
+FailureMode=Allow is fail-open. FailureMode=Block is fail-closed. Use fail-closed when governance is mandatory and evaluator availability is part of the service SLO.
+
+BlockOversizedInputs and BlockOversizedResponses prevent a request from evading policy by placing prohibited content beyond MaxEvaluationBytes. MaxBufferedResponseBytes protects the proxy from unbounded memory use while output governance is enabled.
+
+A refusal returns JSON with error.type=guardrail_refusal, the stage, policy reason, score, categories, evaluation failure state, and correlation ID.
 
 ## MCP catalog behavior
 

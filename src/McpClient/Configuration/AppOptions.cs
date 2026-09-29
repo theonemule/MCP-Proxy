@@ -40,8 +40,8 @@ public sealed class OidcOptions
 /// <summary>Model connection selected by the client for inference.</summary>
 public enum LlmSource
 {
-    /// <summary>Route inference through MCP Proxy's OpenAI-compatible /v1 surface.</summary>
-    Proxy,
+    /// <summary>Route inference through AI Governance Gateway's OpenAI-compatible /v1 surface.</summary>
+    Gateway,
     /// <summary>Call a hosted OpenAI-compatible provider directly.</summary>
     Hosted
 }
@@ -52,11 +52,11 @@ public sealed class LlmConnectionOptions
     /// <summary>OpenAI-compatible API base URL.</summary>
     public string Endpoint { get; set; } = string.Empty;
     /// <summary>
-    /// Bearer credential placed in the OpenAI client's API-key slot. For Proxy this may be a
-    /// gateway mcp_ API key or an OAuth/OIDC access token. Empty Proxy credentials reuse login.
+    /// Bearer credential placed in the OpenAI client's API-key slot. For Gateway this may be a
+    /// gateway aigw_ API key or an OAuth/OIDC access token. Empty Gateway credentials reuse login.
     /// </summary>
     public string ApiKey { get; set; } = string.Empty;
-    /// <summary>Public proxy model alias or hosted provider model/deployment ID.</summary>
+    /// <summary>Public gateway model alias or hosted provider model/deployment ID.</summary>
     public string Model { get; set; } = string.Empty;
 }
 
@@ -66,7 +66,7 @@ public sealed record LlmModelDiscoveryRequest(
     string Endpoint,
     string? ApiKey);
 
-/// <summary>Switchable proxy/hosted model profiles and shared agent-loop settings.</summary>
+/// <summary>Switchable gateway/hosted model profiles and shared agent-loop settings.</summary>
 public sealed class LlmOptions
 {
     /// <summary>Configuration section name.</summary>
@@ -75,8 +75,8 @@ public sealed class LlmOptions
     /// <summary>Profile used for the next chat turn.</summary>
     public LlmSource Source { get; set; } = LlmSource.Hosted;
 
-    /// <summary>MCP Proxy OpenAI-compatible model profile.</summary>
-    public LlmConnectionOptions Proxy { get; set; } = new()
+    /// <summary>AI Governance Gateway OpenAI-compatible model profile.</summary>
+    public LlmConnectionOptions Gateway { get; set; } = new()
     {
         Endpoint = "http://localhost:5105/v1"
     };
@@ -105,7 +105,7 @@ public sealed class LlmOptions
     /// <summary>Returns the currently selected model connection.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public LlmConnectionOptions ActiveConnection =>
-        Source == LlmSource.Proxy ? Proxy : Hosted;
+        Source == LlmSource.Gateway ? Gateway : Hosted;
 }
 
 /// <summary>Credential forwarding mode for a downstream MCP server.</summary>

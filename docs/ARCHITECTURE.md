@@ -1,11 +1,13 @@
 # Architecture
 
-MCP Proxy is a shared gateway with two parallel northbound planes:
+AI Governance Gateway is a shared AI governance enforcement point with two parallel northbound planes:
 
 - an MCP plane for tools, resources, and prompts
 - a model-inference plane using an OpenAI-compatible API
 
 Both planes reuse the same authentication principal and role system.
+
+Cross-cutting governance services apply authentication, authorization, configurable model-based guardrails, structured telemetry, audit correlation, and model-routing policy before traffic reaches downstream AI capabilities.
 
 ## System context
 
@@ -16,7 +18,7 @@ flowchart LR
     O[OpenAI-compatible clients]
     A[Administration browser]
 
-    P[MCP Proxy]
+    P[AI Governance Gateway]
 
     DB[(SQLite / PostgreSQL / SQL Server)]
     R[(Redis optional)]
@@ -51,7 +53,7 @@ flowchart LR
 
 ### ASP.NET Core host
 
-src/McpProxy/Program.cs composes authentication, authorization, EF Core, MCP protocol handlers, model services, cache coordination, static administration files, and endpoint mappings.
+src/AIGovernanceGateway/Program.cs composes authentication, authorization, EF Core, MCP protocol handlers, model services, cache coordination, static administration files, and endpoint mappings.
 
 ### Identity and authorization
 
@@ -89,6 +91,7 @@ Models contains:
 - OpenAiCompatibilityService
 - OpenAiCompatibilityEndpoints
 - ModelRouteSelector
+- ModelRoutingDecisionService
 - ModelRoutingState
 - ModelRouterService
 - NativeModelProxyService
@@ -142,16 +145,16 @@ MCP catalogs and model health state are derived runtime state.
 ~~~mermaid
 sequenceDiagram
     participant Client
-    participant Proxy
+    participant Gateway
     participant Perm as PermissionService
     participant Cache as CatalogCache
 
-    Client->>Proxy: tools/list
-    Proxy->>Perm: resolve caller roles and permissions
-    Proxy->>Cache: read cached downstream catalogs
-    Cache-->>Proxy: tools from registered servers
-    Proxy->>Proxy: filter and namespace allowed tools
-    Proxy-->>Client: authorized tool list
+    Client->>Gateway: tools/list
+    Gateway->>Perm: resolve caller roles and permissions
+    Gateway->>Cache: read cached downstream catalogs
+    Cache-->>Gateway: tools from registered servers
+    Gateway->>Gateway: filter and namespace allowed tools
+    Gateway-->>Client: authorized tool list
 ~~~
 
 Discovery does not return unauthorized capabilities.
@@ -161,89 +164,99 @@ Discovery does not return unauthorized capabilities.
 ~~~mermaid
 sequenceDiagram
     participant Client
-    participant Proxy
+    participant Gateway
     participant Perm as PermissionService
     participant Factory as DownstreamClientFactory
     participant Server as Downstream MCP server
 
-    Client->>Proxy: tools/call docs__search
-    Proxy->>Proxy: resolve namespace and native name
-    Proxy->>Perm: authorize tool/server
-    Perm-->>Proxy: allowed
-    Proxy->>Factory: create downstream MCP client
+    Client->>Gateway: tools/call docs__search
+    Gateway->>Gateway: resolve namespace and native name
+    Gateway->>Perm: authorize tool/server
+    Perm-->>Gateway: allowed
+    Gateway->>Factory: create downstream MCP client
     Factory->>Server: Streamable HTTP MCP request
     Server-->>Factory: MCP result
-    Factory-->>Proxy: result
-    Proxy-->>Client: result
+    Factory-->>Gateway: result
+    Gateway-->>Client: result
 ~~~
 
 ## Model request flow with an explicit public model
 
-When model is supplied, the gateway uses that public route and does not consult the default route.
+When model is supplied, the gateway uses that public route and does not consult the default route. A single-target route behaves as fixed routing. A multi-target route can still use model-driven backend selection.
 
 ~~~mermaid
 sequenceDiagram
     participant Client
     participant API as /v1
     participant Perm as PermissionService
-    participant Router as ModelRouteSelector
+    participant Selector as ModelRouteSelector
+    participant Decision as ModelRoutingDecisionService
+    participant RoutingModel as Routing model
     participant Provider
 
     Client->>API: request model = gpt-5.6
     API->>Perm: authorize logical route
-    API->>Router: rank candidates inside gpt-5.6
-    Router-->>API: candidate order
-    API->>Perm: authorize candidate target
+    API->>Selector: hard-filter and fallback-rank candidates
+    Selector-->>API: compatible candidate order
+    API->>Perm: authorize candidate targets
+    API->>Decision: authorized candidates + request
+    Decision->>RoutingModel: summarize intent, infer task, choose candidate
+    RoutingModel-->>Decision: structured routing decision
+    Decision-->>API: selected candidate first + fallback order
     API->>Provider: request using private downstream model
     Provider-->>API: response
     API->>API: rewrite model identity to gpt-5.6
     API-->>Client: OpenAI-compatible response
 ~~~
 
-Explicit public-route selection and backend target selection are separate steps.
-
-A named route may still contain several targets.
+Explicit public-route selection and backend target selection are separate steps. If the route has one backend, or no routing model is configured, no semantic routing call is required.
 
 ## Model request flow with the default router
 
-When model is omitted:
+When model is omitted, the gateway first resolves the normal ModelRoute marked IsDefault. The routing controller is a different ModelRoute marked IsRoutingModel.
 
 ~~~mermaid
 sequenceDiagram
     participant Client
     participant API as /v1
     participant DB
-    participant Router as ModelRouteSelector
+    participant Selector as ModelRouteSelector
+    participant Decision as ModelRoutingDecisionService
+    participant RoutingModel as Routing model
     participant Provider
 
     Client->>API: request without model
     API->>DB: resolve enabled IsDefault route
     DB-->>API: logical route
-    API->>Router: infer requirements and rank candidates
-    Router-->>API: candidate order
-    API->>Provider: request
+    API->>Selector: hard-filter and fallback-rank candidates
+    Selector-->>API: compatible candidates
+    API->>Decision: authorized candidates + request
+    Decision->>RoutingModel: summarize intent, identify inference task, match candidates
+    RoutingModel-->>Decision: selected candidate
+    Decision-->>API: selected candidate first + failover order
+    API->>Provider: inference request
     Provider-->>API: response
     API-->>Client: public route identity
 ~~~
 
-The default router is a normal ModelRoute with IsDefault set. There is no separate router entity.
+The routing-model invocation bypasses intelligent routing to prevent recursion. If it is missing, unavailable, or returns an invalid decision, the deterministic selector order is used instead.
 
 ## Native model pass-through flow
 
 ~~~mermaid
 sequenceDiagram
     participant Client
-    participant Proxy
+    participant Gateway
     participant Perm as PermissionService
     participant Provider
 
-    Client->>Proxy: /models/native/{provider}/...
-    Proxy->>Perm: authorize provider scope
-    Proxy->>Proxy: strip northbound credentials and unsafe headers
-    Proxy->>Proxy: add configured provider credential
-    Proxy->>Provider: native request
-    Provider-->>Proxy: native response or stream
-    Proxy-->>Client: native response or stream
+    Client->>Gateway: /models/native/{provider}/...
+    Gateway->>Perm: authorize provider scope
+    Gateway->>Gateway: strip northbound credentials and unsafe headers
+    Gateway->>Gateway: add configured provider credential
+    Gateway->>Provider: native request
+    Provider-->>Gateway: native response or stream
+    Gateway-->>Client: native response or stream
 ~~~
 
 Native pass-through intentionally does not normalize the provider API.
@@ -257,21 +270,21 @@ logical route
   -> primary target plus additional route targets
   -> enabled and protocol compatibility filtering
   -> hard capability and token-limit filtering
-  -> suitability scoring
-  -> administrative priority
-  -> weighted tie selection
+  -> health/circuit filtering
+  -> deterministic suitability/priority/weight fallback order
   -> authorization filtering
+  -> routing model summarizes intent and identifies inference task
+  -> routing model selects best eligible candidate
+  -> selected candidate moves to front of fallback list
   -> execution and failover
   -> circuit-state updates
 ~~~
 
 Hard filters include declared unsupported tools, vision, or JSON Schema, plus known insufficient context and output limits.
 
-Soft scoring includes reasoning fit, specialty fit, unknown-capability risk, cost tier, and latency tier.
+The model-driven decision uses the request intent and inference task together with candidate reasoning, specialty, context, feature, cost, and latency metadata.
 
-Priority is a policy control after task fit.
-
-Weight is not general traffic splitting. It is used only when candidates are tied by suitability and priority.
+The deterministic suitability/priority/weight order remains available if the routing controller cannot return a valid decision and remains the failover order behind the selected candidate.
 
 ## Authentication boundary
 
@@ -377,10 +390,10 @@ This state is intentionally not in the relational database and is not currently 
 
 ~~~mermaid
 flowchart LR
-    Client --> Proxy
-    Proxy --> SQLite[(SQLite)]
-    Proxy --> MCP[MCP servers]
-    Proxy --> Models[Model providers]
+    Client --> Gateway
+    Gateway --> SQLite[(SQLite)]
+    Gateway --> MCP[MCP servers]
+    Gateway --> Models[Model providers]
 ~~~
 
 This is appropriate for development and small deployments.
@@ -390,8 +403,8 @@ This is appropriate for development and small deployments.
 ~~~mermaid
 flowchart LR
     Client --> LB[Load balancer]
-    LB --> P1[Proxy node 1]
-    LB --> P2[Proxy node 2]
+    LB --> P1[Gateway node 1]
+    LB --> P2[Gateway node 2]
 
     P1 --> DB[(PostgreSQL / SQL Server)]
     P2 --> DB
@@ -417,10 +430,10 @@ The important trust boundaries are:
 1. **Northbound client to proxy**
    - authenticate the caller
    - authorize the requested MCP capability or model route
-2. **Proxy to downstream MCP server**
+2. **Gateway to downstream MCP server**
    - resolve the registered downstream credential
    - do not accidentally leak unrelated northbound headers
-3. **Proxy to model provider**
+3. **Gateway to model provider**
    - never reuse the caller's gateway bearer credential as the provider credential
    - apply only the provider credential configured for that provider
 4. **Administrator to configuration store**
@@ -428,6 +441,18 @@ The important trust boundaries are:
    - store secret references instead of model-provider plaintext secrets
 
 The architecture deliberately treats native provider access as broader than logical route access.
+
+## Telemetry and governance boundary
+
+GatewayTelemetryMiddleware sits on the northbound data plane after authentication/authorization and before the mapped MCP/model endpoints. It assigns or propagates a correlation ID, captures request/response telemetry, and optionally invokes GuardrailService.
+
+Outbound MCP and model HttpClient instances include GatewayTelemetryHttpHandler, so southbound provider traffic uses the same structured telemetry envelope. GatewayService and the model routing services add semantic events for MCP operations, model selection, intent classification, failover, and guardrail decisions.
+
+Telemetry is sink-neutral. The application emits through ILogger and does not persist telemetry in the application database.
+
+When output guardrails are enabled, governed responses are buffered until the evaluator returns an allow/block decision. This deliberately trades streaming immediacy for the guarantee that blocked output is not partially released. The guardrail evaluator is invoked internally through ModelRouterService.ChatInternalAsync, bypassing public model routing and avoiding recursive guardrail evaluation.
+
+Credential-bearing headers and credential-shaped JSON properties are redacted before telemetry emission or guardrail evaluation. Additional redaction names are configuration-driven.
 
 ## Schema initialization
 

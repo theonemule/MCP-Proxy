@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/McpClient/McpClient.csproj" />
+    <Project Path="src/AIGovernanceGateway/AIGovernanceGateway.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AIGovernanceGateway.Tests/AIGovernanceGateway.Tests.csproj" />
+  </Folder>
+</Solution>

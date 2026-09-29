@@ -2,7 +2,7 @@
 
 McpClient is a separate web application included in the solution.
 
-It is useful for testing or using the gateway interactively, but it is not required for MCP Proxy.
+It is useful for testing or using the gateway interactively, but it is not required for AI Governance Gateway.
 
 The client combines:
 
@@ -61,7 +61,7 @@ When OIDC is enabled, the client protects its /api routes with the signed-in coo
 The client supports two model sources:
 
 ~~~text
-Proxy
+Gateway
 Hosted
 ~~~
 
@@ -73,7 +73,7 @@ ApiKey
 Model
 ~~~
 
-### Proxy profile
+### Gateway profile
 
 The default proxy endpoint is:
 
@@ -81,15 +81,15 @@ The default proxy endpoint is:
 http://localhost:5105/v1
 ~~~
 
-The Model value is a public MCP Proxy model route.
+The Model value is a public AI Governance Gateway model route.
 
 The ApiKey field can contain:
 
-- a gateway mcp_ API key
+- a gateway aigw_ API key
 - an OAuth/OIDC access token
 - nothing
 
-When the Proxy credential is blank, ChatService can reuse the signed-in user's access token.
+When the Gateway credential is blank, ChatService can reuse the signed-in user's access token.
 
 This makes the browser client useful for end-to-end OIDC and model-route RBAC testing.
 
@@ -109,7 +109,7 @@ POST /api/llm-models
 
 to query an OpenAI-compatible models endpoint.
 
-For Proxy mode, this can exercise the gateway with either:
+For Gateway mode, this can exercise the gateway with either:
 
 - the explicitly entered credential
 - the signed-in user's access token when the credential field is blank
@@ -149,7 +149,7 @@ Restarting the client removes in-memory conversation state.
 
 The browser client has its own MCP server registry.
 
-This is separate from the downstream server registry stored by MCP Proxy.
+This is separate from the downstream server registry stored by AI Governance Gateway.
 
 The client registry is persisted in:
 
@@ -201,9 +201,9 @@ Use IdToken only when that is explicitly what the downstream service expects.
 
 Use ApiKey for a static server-specific credential.
 
-## Using MCP Proxy from the client
+## Using AI Governance Gateway from the client
 
-A common configuration is to register MCP Proxy itself as one client MCP server:
+A common configuration is to register AI Governance Gateway itself as one client MCP server:
 
 ~~~text
 Endpoint: http://localhost:5105/mcp
@@ -217,9 +217,9 @@ For a machine-style test, use a gateway API key.
 
 ## Direct downstream MCP connections
 
-The browser client can also connect directly to other MCP servers without using MCP Proxy.
+The browser client can also connect directly to other MCP servers without using AI Governance Gateway.
 
-This is useful for development and comparison, but direct connections do not receive MCP Proxy's central RBAC, namespace, or catalog-governance behavior.
+This is useful for development and comparison, but direct connections do not receive AI Governance Gateway's central RBAC, namespace, or catalog-governance behavior.
 
 ## Resources and prompts
 
@@ -265,7 +265,7 @@ GET /api/session
 
 ## Security notes
 
-The browser client and MCP Proxy have separate security responsibilities.
+The browser client and AI Governance Gateway have separate security responsibilities.
 
 The client owns:
 
@@ -281,7 +281,7 @@ The proxy owns:
 - model permissions
 - downstream proxy/provider credentials
 
-A signed-in client user does not automatically have permission in MCP Proxy. The access token and proxy claim-role mappings or linked user roles must produce the required authorization.
+A signed-in client user does not automatically have permission in AI Governance Gateway. The access token and proxy claim-role mappings or linked user roles must produce the required authorization.
 
 ## Troubleshooting
 
@@ -289,11 +289,11 @@ A signed-in client user does not automatically have permission in MCP Proxy. The
 
 Check:
 
-- Proxy endpoint ends in /v1
+- Gateway endpoint ends in /v1
 - access token audience
 - proxy OIDC/JWT validation
 - model-route permissions
-- whether an explicit Proxy credential overrides login-token reuse
+- whether an explicit Gateway credential overrides login-token reuse
 
 ### Tools do not appear in chat
 
@@ -313,6 +313,6 @@ That is expected. ConversationStore is in memory.
 
 Connection failures are collected per server so one unavailable MCP server does not necessarily prevent the client from using other reachable servers.
 
-### Proxy mode works with an API key but not a blank credential
+### Gateway mode works with an API key but not a blank credential
 
-A blank Proxy credential relies on the signed-in user's access token. Verify OIDC login stored a usable access token and that the proxy accepts its issuer/audience.
+A blank Gateway credential relies on the signed-in user's access token. Verify OIDC login stored a usable access token and that the proxy accepts its issuer/audience.
