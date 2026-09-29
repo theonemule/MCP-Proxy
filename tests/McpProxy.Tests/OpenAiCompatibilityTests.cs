@@ -30,6 +30,26 @@ public sealed class OpenAiCompatibilityTests
     }
 
     [Fact]
+    public async Task Default_route_is_used_when_openai_request_omits_model()
+    {
+        var handler = new OpenAiHandler();
+        var fixture = await CreateAsync(ModelProviderKind.OpenAiCompatible, "https://provider.example/v1", handler);
+
+        var request = JsonNode.Parse(
+            """
+            {
+              "messages":[{"role":"user","content":"Hello"}]
+            }
+            """)!.AsObject();
+
+        var response = await fixture.Service.CreateChatCompletionAsync(fixture.Principal, request, default);
+
+        Assert.Equal("public-model", response["model"]?.GetValue<string>());
+        var downstream = JsonNode.Parse(handler.LastBody!)!.AsObject();
+        Assert.Equal("downstream-model", downstream["model"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Native_openai_provider_preserves_contract_and_rewrites_only_model_identity()
     {
         var handler = new OpenAiHandler();
@@ -468,7 +488,8 @@ public sealed class OpenAiCompatibilityTests
             ProviderId = provider.Id,
             Provider = provider,
             PublicName = "public-model",
-            DownstreamModel = "downstream-model"
+            DownstreamModel = "downstream-model",
+            IsDefault = true
         };
         var role = new Role { Name = "Model Users" };
         var user = new User { Username = "openai-client", PasswordHash = "x" };

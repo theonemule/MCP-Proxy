@@ -1,15 +1,16 @@
+using System.Data;
 using McpProxy.Data;
 using Microsoft.EntityFrameworkCore;
 
 namespace McpProxy.Models;
 
 /// <summary>
-/// Adds the model-router tables to databases created by pre-model-router releases. Fresh databases
-/// are created by EF EnsureCreated; this class only bridges the existing project's no-migrations model.
+/// Adds and upgrades model-router tables for databases created by earlier releases. Fresh databases
+/// are created by EF EnsureCreated; this class bridges the existing project's no-migrations model.
 /// </summary>
 public static class ModelSchemaUpgrade
 {
-    /// <summary>Creates missing model-router tables and indexes without altering existing MCP tables.</summary>
+    /// <summary>Creates missing model-router tables and adds backward-compatible routing columns when needed.</summary>
     public static async Task EnsureAsync(ProxyDbContext db, CancellationToken cancellationToken = default)
     {
         var provider = db.Database.ProviderName ?? "";
@@ -21,6 +22,7 @@ public static class ModelSchemaUpgrade
         if (provider.Contains("Sqlite", StringComparison.OrdinalIgnoreCase))
         {
             await db.Database.ExecuteSqlRawAsync(SqliteSql, cancellationToken);
+            await EnsureSqliteRoutingColumnsAsync(db, cancellationToken);
             return;
         }
 
@@ -65,6 +67,18 @@ CREATE TABLE IF NOT EXISTS "ModelRoutes" (
     "PublicName" TEXT NOT NULL,
     "DownstreamModel" TEXT NOT NULL,
     "Enabled" INTEGER NOT NULL,
+    "IsDefault" INTEGER NOT NULL DEFAULT 0,
+    "Priority" INTEGER NOT NULL DEFAULT 0,
+    "Weight" INTEGER NOT NULL DEFAULT 100,
+    "ReasoningLevel" INTEGER NOT NULL DEFAULT 2,
+    "MaxContextTokens" INTEGER NOT NULL DEFAULT 0,
+    "MaxOutputTokens" INTEGER NOT NULL DEFAULT 0,
+    "SupportsTools" INTEGER NULL,
+    "SupportsVision" INTEGER NULL,
+    "SupportsJsonSchema" INTEGER NULL,
+    "CostTier" INTEGER NOT NULL DEFAULT 0,
+    "LatencyTier" INTEGER NOT NULL DEFAULT 0,
+    "Specialties" TEXT NULL,
     "CreatedAt" TEXT NOT NULL,
     CONSTRAINT "FK_ModelRoutes_ModelProviders_ProviderId" FOREIGN KEY ("ProviderId")
         REFERENCES "ModelProviders" ("Id") ON DELETE CASCADE
@@ -80,6 +94,15 @@ CREATE TABLE IF NOT EXISTS "ModelRouteTargets" (
     "Priority" INTEGER NOT NULL,
     "Weight" INTEGER NOT NULL,
     "Enabled" INTEGER NOT NULL,
+    "ReasoningLevel" INTEGER NOT NULL DEFAULT 2,
+    "MaxContextTokens" INTEGER NOT NULL DEFAULT 0,
+    "MaxOutputTokens" INTEGER NOT NULL DEFAULT 0,
+    "SupportsTools" INTEGER NULL,
+    "SupportsVision" INTEGER NULL,
+    "SupportsJsonSchema" INTEGER NULL,
+    "CostTier" INTEGER NOT NULL DEFAULT 0,
+    "LatencyTier" INTEGER NOT NULL DEFAULT 0,
+    "Specialties" TEXT NULL,
     "CreatedAt" TEXT NOT NULL,
     CONSTRAINT "FK_ModelRouteTargets_ModelRoutes_ModelRouteId" FOREIGN KEY ("ModelRouteId")
         REFERENCES "ModelRoutes" ("Id") ON DELETE CASCADE,
@@ -138,6 +161,18 @@ CREATE TABLE IF NOT EXISTS "ModelRoutes" (
     "PublicName" text NOT NULL,
     "DownstreamModel" text NOT NULL,
     "Enabled" boolean NOT NULL,
+    "IsDefault" boolean NOT NULL DEFAULT false,
+    "Priority" integer NOT NULL DEFAULT 0,
+    "Weight" integer NOT NULL DEFAULT 100,
+    "ReasoningLevel" integer NOT NULL DEFAULT 2,
+    "MaxContextTokens" integer NOT NULL DEFAULT 0,
+    "MaxOutputTokens" integer NOT NULL DEFAULT 0,
+    "SupportsTools" boolean NULL,
+    "SupportsVision" boolean NULL,
+    "SupportsJsonSchema" boolean NULL,
+    "CostTier" integer NOT NULL DEFAULT 0,
+    "LatencyTier" integer NOT NULL DEFAULT 0,
+    "Specialties" text NULL,
     "CreatedAt" timestamp with time zone NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRoutes_PublicName" ON "ModelRoutes" ("PublicName");
@@ -151,6 +186,15 @@ CREATE TABLE IF NOT EXISTS "ModelRouteTargets" (
     "Priority" integer NOT NULL,
     "Weight" integer NOT NULL,
     "Enabled" boolean NOT NULL,
+    "ReasoningLevel" integer NOT NULL DEFAULT 2,
+    "MaxContextTokens" integer NOT NULL DEFAULT 0,
+    "MaxOutputTokens" integer NOT NULL DEFAULT 0,
+    "SupportsTools" boolean NULL,
+    "SupportsVision" boolean NULL,
+    "SupportsJsonSchema" boolean NULL,
+    "CostTier" integer NOT NULL DEFAULT 0,
+    "LatencyTier" integer NOT NULL DEFAULT 0,
+    "Specialties" text NULL,
     "CreatedAt" timestamp with time zone NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ModelRouteId_ProviderId_DownstreamModel"
@@ -171,6 +215,29 @@ CREATE INDEX IF NOT EXISTS "IX_ModelPermissions_ProviderId" ON "ModelPermissions
 CREATE INDEX IF NOT EXISTS "IX_ModelPermissions_ModelRouteId" ON "ModelPermissions" ("ModelRouteId");
 CREATE INDEX IF NOT EXISTS "IX_ModelPermissions_RoleId_Scope_ProviderId_ModelRouteId"
     ON "ModelPermissions" ("RoleId", "Scope", "ProviderId", "ModelRouteId");
+
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "IsDefault" boolean NOT NULL DEFAULT false;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "Priority" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "Weight" integer NOT NULL DEFAULT 100;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "ReasoningLevel" integer NOT NULL DEFAULT 2;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "MaxContextTokens" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "MaxOutputTokens" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "SupportsTools" boolean NULL;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "SupportsVision" boolean NULL;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "SupportsJsonSchema" boolean NULL;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "CostTier" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "LatencyTier" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRoutes" ADD COLUMN IF NOT EXISTS "Specialties" text NULL;
+
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "ReasoningLevel" integer NOT NULL DEFAULT 2;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "MaxContextTokens" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "MaxOutputTokens" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "SupportsTools" boolean NULL;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "SupportsVision" boolean NULL;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "SupportsJsonSchema" boolean NULL;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "CostTier" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "LatencyTier" integer NOT NULL DEFAULT 0;
+ALTER TABLE "ModelRouteTargets" ADD COLUMN IF NOT EXISTS "Specialties" text NULL;
 """;
 
     private const string SqlServerSql = """
@@ -204,6 +271,18 @@ BEGIN
         [PublicName] nvarchar(450) NOT NULL,
         [DownstreamModel] nvarchar(max) NOT NULL,
         [Enabled] bit NOT NULL,
+        [IsDefault] bit NOT NULL CONSTRAINT [DF_ModelRoutes_IsDefault] DEFAULT 0,
+        [Priority] int NOT NULL CONSTRAINT [DF_ModelRoutes_Priority] DEFAULT 0,
+        [Weight] int NOT NULL CONSTRAINT [DF_ModelRoutes_Weight] DEFAULT 100,
+        [ReasoningLevel] int NOT NULL CONSTRAINT [DF_ModelRoutes_ReasoningLevel] DEFAULT 2,
+        [MaxContextTokens] int NOT NULL CONSTRAINT [DF_ModelRoutes_MaxContextTokens] DEFAULT 0,
+        [MaxOutputTokens] int NOT NULL CONSTRAINT [DF_ModelRoutes_MaxOutputTokens] DEFAULT 0,
+        [SupportsTools] bit NULL,
+        [SupportsVision] bit NULL,
+        [SupportsJsonSchema] bit NULL,
+        [CostTier] int NOT NULL CONSTRAINT [DF_ModelRoutes_CostTier] DEFAULT 0,
+        [LatencyTier] int NOT NULL CONSTRAINT [DF_ModelRoutes_LatencyTier] DEFAULT 0,
+        [Specialties] nvarchar(max) NULL,
         [CreatedAt] datetimeoffset NOT NULL,
         CONSTRAINT [FK_ModelRoutes_ModelProviders_ProviderId] FOREIGN KEY ([ProviderId])
             REFERENCES [ModelProviders] ([Id]) ON DELETE CASCADE
@@ -222,6 +301,15 @@ BEGIN
         [Priority] int NOT NULL,
         [Weight] int NOT NULL,
         [Enabled] bit NOT NULL,
+        [ReasoningLevel] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_ReasoningLevel] DEFAULT 2,
+        [MaxContextTokens] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_MaxContextTokens] DEFAULT 0,
+        [MaxOutputTokens] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_MaxOutputTokens] DEFAULT 0,
+        [SupportsTools] bit NULL,
+        [SupportsVision] bit NULL,
+        [SupportsJsonSchema] bit NULL,
+        [CostTier] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_CostTier] DEFAULT 0,
+        [LatencyTier] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_LatencyTier] DEFAULT 0,
+        [Specialties] nvarchar(max) NULL,
         [CreatedAt] datetimeoffset NOT NULL,
         CONSTRAINT [FK_ModelRouteTargets_ModelRoutes_ModelRouteId] FOREIGN KEY ([ModelRouteId])
             REFERENCES [ModelRoutes] ([Id]) ON DELETE CASCADE,
@@ -256,5 +344,117 @@ BEGIN
     CREATE INDEX [IX_ModelPermissions_RoleId_Scope_ProviderId_ModelRouteId]
         ON [ModelPermissions] ([RoleId], [Scope], [ProviderId], [ModelRouteId]);
 END;
+
+IF COL_LENGTH('ModelRoutes', 'IsDefault') IS NULL ALTER TABLE [ModelRoutes] ADD [IsDefault] bit NOT NULL CONSTRAINT [DF_ModelRoutes_IsDefault_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'Priority') IS NULL ALTER TABLE [ModelRoutes] ADD [Priority] int NOT NULL CONSTRAINT [DF_ModelRoutes_Priority_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'Weight') IS NULL ALTER TABLE [ModelRoutes] ADD [Weight] int NOT NULL CONSTRAINT [DF_ModelRoutes_Weight_Upgrade] DEFAULT 100;
+IF COL_LENGTH('ModelRoutes', 'ReasoningLevel') IS NULL ALTER TABLE [ModelRoutes] ADD [ReasoningLevel] int NOT NULL CONSTRAINT [DF_ModelRoutes_ReasoningLevel_Upgrade] DEFAULT 2;
+IF COL_LENGTH('ModelRoutes', 'MaxContextTokens') IS NULL ALTER TABLE [ModelRoutes] ADD [MaxContextTokens] int NOT NULL CONSTRAINT [DF_ModelRoutes_MaxContextTokens_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'MaxOutputTokens') IS NULL ALTER TABLE [ModelRoutes] ADD [MaxOutputTokens] int NOT NULL CONSTRAINT [DF_ModelRoutes_MaxOutputTokens_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'SupportsTools') IS NULL ALTER TABLE [ModelRoutes] ADD [SupportsTools] bit NULL;
+IF COL_LENGTH('ModelRoutes', 'SupportsVision') IS NULL ALTER TABLE [ModelRoutes] ADD [SupportsVision] bit NULL;
+IF COL_LENGTH('ModelRoutes', 'SupportsJsonSchema') IS NULL ALTER TABLE [ModelRoutes] ADD [SupportsJsonSchema] bit NULL;
+IF COL_LENGTH('ModelRoutes', 'CostTier') IS NULL ALTER TABLE [ModelRoutes] ADD [CostTier] int NOT NULL CONSTRAINT [DF_ModelRoutes_CostTier_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'LatencyTier') IS NULL ALTER TABLE [ModelRoutes] ADD [LatencyTier] int NOT NULL CONSTRAINT [DF_ModelRoutes_LatencyTier_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRoutes', 'Specialties') IS NULL ALTER TABLE [ModelRoutes] ADD [Specialties] nvarchar(max) NULL;
+
+IF COL_LENGTH('ModelRouteTargets', 'ReasoningLevel') IS NULL ALTER TABLE [ModelRouteTargets] ADD [ReasoningLevel] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_ReasoningLevel_Upgrade] DEFAULT 2;
+IF COL_LENGTH('ModelRouteTargets', 'MaxContextTokens') IS NULL ALTER TABLE [ModelRouteTargets] ADD [MaxContextTokens] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_MaxContextTokens_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRouteTargets', 'MaxOutputTokens') IS NULL ALTER TABLE [ModelRouteTargets] ADD [MaxOutputTokens] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_MaxOutputTokens_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRouteTargets', 'SupportsTools') IS NULL ALTER TABLE [ModelRouteTargets] ADD [SupportsTools] bit NULL;
+IF COL_LENGTH('ModelRouteTargets', 'SupportsVision') IS NULL ALTER TABLE [ModelRouteTargets] ADD [SupportsVision] bit NULL;
+IF COL_LENGTH('ModelRouteTargets', 'SupportsJsonSchema') IS NULL ALTER TABLE [ModelRouteTargets] ADD [SupportsJsonSchema] bit NULL;
+IF COL_LENGTH('ModelRouteTargets', 'CostTier') IS NULL ALTER TABLE [ModelRouteTargets] ADD [CostTier] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_CostTier_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRouteTargets', 'LatencyTier') IS NULL ALTER TABLE [ModelRouteTargets] ADD [LatencyTier] int NOT NULL CONSTRAINT [DF_ModelRouteTargets_LatencyTier_Upgrade] DEFAULT 0;
+IF COL_LENGTH('ModelRouteTargets', 'Specialties') IS NULL ALTER TABLE [ModelRouteTargets] ADD [Specialties] nvarchar(max) NULL;
 """;
+
+    private static async Task EnsureSqliteRoutingColumnsAsync(
+        ProxyDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var connection = db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+        if (shouldClose)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+
+        try
+        {
+            await EnsureSqliteColumnsAsync(
+                connection,
+                "ModelRoutes",
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["IsDefault"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["Priority"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["Weight"] = "INTEGER NOT NULL DEFAULT 100",
+                    ["ReasoningLevel"] = "INTEGER NOT NULL DEFAULT 2",
+                    ["MaxContextTokens"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["MaxOutputTokens"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["SupportsTools"] = "INTEGER NULL",
+                    ["SupportsVision"] = "INTEGER NULL",
+                    ["SupportsJsonSchema"] = "INTEGER NULL",
+                    ["CostTier"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["LatencyTier"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["Specialties"] = "TEXT NULL"
+                },
+                cancellationToken);
+
+            await EnsureSqliteColumnsAsync(
+                connection,
+                "ModelRouteTargets",
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ReasoningLevel"] = "INTEGER NOT NULL DEFAULT 2",
+                    ["MaxContextTokens"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["MaxOutputTokens"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["SupportsTools"] = "INTEGER NULL",
+                    ["SupportsVision"] = "INTEGER NULL",
+                    ["SupportsJsonSchema"] = "INTEGER NULL",
+                    ["CostTier"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["LatencyTier"] = "INTEGER NOT NULL DEFAULT 0",
+                    ["Specialties"] = "TEXT NULL"
+                },
+                cancellationToken);
+        }
+        finally
+        {
+            if (shouldClose)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
+    private static async Task EnsureSqliteColumnsAsync(
+        System.Data.Common.DbConnection connection,
+        string table,
+        IReadOnlyDictionary<string, string> columns,
+        CancellationToken cancellationToken)
+    {
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA table_info(\"" + table + "\");";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                existing.Add(reader.GetString(1));
+            }
+        }
+
+        foreach (var (name, definition) in columns)
+        {
+            if (existing.Contains(name))
+            {
+                continue;
+            }
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = "ALTER TABLE \"" + table + "\" ADD COLUMN \"" + name + "\" " + definition + ";";
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
 }

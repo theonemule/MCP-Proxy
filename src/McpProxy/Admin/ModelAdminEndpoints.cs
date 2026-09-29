@@ -26,16 +26,37 @@ public sealed record CreateModelRouteRequest(
     Guid ProviderId,
     string PublicName,
     string DownstreamModel,
-    bool Enabled = true);
+    bool Enabled = true,
+    bool IsDefault = false,
+    int Priority = 0,
+    int Weight = 100,
+    ModelReasoningLevel ReasoningLevel = ModelReasoningLevel.Medium,
+    int MaxContextTokens = 0,
+    int MaxOutputTokens = 0,
+    bool? SupportsTools = null,
+    bool? SupportsVision = null,
+    bool? SupportsJsonSchema = null,
+    int CostTier = 0,
+    int LatencyTier = 0,
+    string? Specialties = null);
 
-/// <summary>Request to add or replace one weighted/failover target behind a public route.</summary>
+/// <summary>Request to add or replace one intelligent-routing target behind a public route.</summary>
 public sealed record CreateModelRouteTargetRequest(
     Guid ModelRouteId,
     Guid ProviderId,
     string DownstreamModel,
     int Priority = 100,
     int Weight = 100,
-    bool Enabled = true);
+    bool Enabled = true,
+    ModelReasoningLevel ReasoningLevel = ModelReasoningLevel.Medium,
+    int MaxContextTokens = 0,
+    int MaxOutputTokens = 0,
+    bool? SupportsTools = null,
+    bool? SupportsVision = null,
+    bool? SupportsJsonSchema = null,
+    int CostTier = 0,
+    int LatencyTier = 0,
+    string? Specialties = null);
 
 /// <summary>Request to grant a role access to a provider or model route.</summary>
 public sealed record CreateModelPermissionRequest(
@@ -171,7 +192,19 @@ public static partial class ModelAdminEndpoints
                     ProviderKind = x.Provider.Kind,
                     x.PublicName,
                     x.DownstreamModel,
-                    x.Enabled
+                    x.Enabled,
+                    x.IsDefault,
+                    x.Priority,
+                    x.Weight,
+                    x.ReasoningLevel,
+                    x.MaxContextTokens,
+                    x.MaxOutputTokens,
+                    x.SupportsTools,
+                    x.SupportsVision,
+                    x.SupportsJsonSchema,
+                    x.CostTier,
+                    x.LatencyTier,
+                    x.Specialties
                 })
                 .ToListAsync()));
 
@@ -185,8 +218,24 @@ public static partial class ModelAdminEndpoints
                 ProviderId = request.ProviderId,
                 PublicName = request.PublicName.Trim(),
                 DownstreamModel = request.DownstreamModel.Trim(),
-                Enabled = request.Enabled
+                Enabled = request.Enabled,
+                IsDefault = request.IsDefault,
+                Priority = request.Priority,
+                Weight = request.Weight,
+                ReasoningLevel = request.ReasoningLevel,
+                MaxContextTokens = request.MaxContextTokens,
+                MaxOutputTokens = request.MaxOutputTokens,
+                SupportsTools = request.SupportsTools,
+                SupportsVision = request.SupportsVision,
+                SupportsJsonSchema = request.SupportsJsonSchema,
+                CostTier = request.CostTier,
+                LatencyTier = request.LatencyTier,
+                Specialties = NullIfWhiteSpace(request.Specialties)
             };
+            if (request.IsDefault)
+            {
+                await ClearOtherDefaultRoutesAsync(db, null);
+            }
             db.ModelRoutes.Add(route);
             await db.SaveChangesAsync();
             return Results.Created($"/admin/model-routes/{route.Id}", new { route.Id });
@@ -204,6 +253,22 @@ public static partial class ModelAdminEndpoints
             route.PublicName = request.PublicName.Trim();
             route.DownstreamModel = request.DownstreamModel.Trim();
             route.Enabled = request.Enabled;
+            route.IsDefault = request.IsDefault;
+            route.Priority = request.Priority;
+            route.Weight = request.Weight;
+            route.ReasoningLevel = request.ReasoningLevel;
+            route.MaxContextTokens = request.MaxContextTokens;
+            route.MaxOutputTokens = request.MaxOutputTokens;
+            route.SupportsTools = request.SupportsTools;
+            route.SupportsVision = request.SupportsVision;
+            route.SupportsJsonSchema = request.SupportsJsonSchema;
+            route.CostTier = request.CostTier;
+            route.LatencyTier = request.LatencyTier;
+            route.Specialties = NullIfWhiteSpace(request.Specialties);
+            if (request.IsDefault)
+            {
+                await ClearOtherDefaultRoutesAsync(db, id);
+            }
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -234,7 +299,16 @@ public static partial class ModelAdminEndpoints
                     x.DownstreamModel,
                     x.Priority,
                     x.Weight,
-                    x.Enabled
+                    x.Enabled,
+                    x.ReasoningLevel,
+                    x.MaxContextTokens,
+                    x.MaxOutputTokens,
+                    x.SupportsTools,
+                    x.SupportsVision,
+                    x.SupportsJsonSchema,
+                    x.CostTier,
+                    x.LatencyTier,
+                    x.Specialties
                 })
                 .ToListAsync()));
 
@@ -250,7 +324,16 @@ public static partial class ModelAdminEndpoints
                 DownstreamModel = request.DownstreamModel.Trim(),
                 Priority = request.Priority,
                 Weight = request.Weight,
-                Enabled = request.Enabled
+                Enabled = request.Enabled,
+                ReasoningLevel = request.ReasoningLevel,
+                MaxContextTokens = request.MaxContextTokens,
+                MaxOutputTokens = request.MaxOutputTokens,
+                SupportsTools = request.SupportsTools,
+                SupportsVision = request.SupportsVision,
+                SupportsJsonSchema = request.SupportsJsonSchema,
+                CostTier = request.CostTier,
+                LatencyTier = request.LatencyTier,
+                Specialties = NullIfWhiteSpace(request.Specialties)
             };
             db.ModelRouteTargets.Add(target);
             await db.SaveChangesAsync();
@@ -274,6 +357,15 @@ public static partial class ModelAdminEndpoints
             target.Priority = request.Priority;
             target.Weight = request.Weight;
             target.Enabled = request.Enabled;
+            target.ReasoningLevel = request.ReasoningLevel;
+            target.MaxContextTokens = request.MaxContextTokens;
+            target.MaxOutputTokens = request.MaxOutputTokens;
+            target.SupportsTools = request.SupportsTools;
+            target.SupportsVision = request.SupportsVision;
+            target.SupportsJsonSchema = request.SupportsJsonSchema;
+            target.CostTier = request.CostTier;
+            target.LatencyTier = request.LatencyTier;
+            target.Specialties = NullIfWhiteSpace(request.Specialties);
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -410,6 +502,19 @@ public static partial class ModelAdminEndpoints
         Guid? existingId,
         ProxyDbContext db)
     {
+        var routingValidation = ValidateRoutingProfile(
+            request.Priority,
+            request.Weight,
+            request.ReasoningLevel,
+            request.MaxContextTokens,
+            request.MaxOutputTokens,
+            request.CostTier,
+            request.LatencyTier);
+        if (routingValidation is not null)
+        {
+            return routingValidation;
+        }
+
         if (!await db.ModelProviders.AnyAsync(x => x.Id == request.ProviderId))
         {
             return Results.BadRequest("ProviderId must identify an existing provider.");
@@ -448,14 +553,17 @@ public static partial class ModelAdminEndpoints
             return Results.BadRequest("DownstreamModel is required.");
         }
 
-        if (request.Priority is < 0 or > 100000)
+        var routingValidation = ValidateRoutingProfile(
+            request.Priority,
+            request.Weight,
+            request.ReasoningLevel,
+            request.MaxContextTokens,
+            request.MaxOutputTokens,
+            request.CostTier,
+            request.LatencyTier);
+        if (routingValidation is not null)
         {
-            return Results.BadRequest("Priority must be between 0 and 100000.");
-        }
-
-        if (request.Weight is < 1 or > 10000)
-        {
-            return Results.BadRequest("Weight must be between 1 and 10000.");
+            return routingValidation;
         }
 
         var downstream = request.DownstreamModel.Trim();
@@ -477,6 +585,55 @@ public static partial class ModelAdminEndpoints
         }
 
         return null;
+    }
+
+    private static IResult? ValidateRoutingProfile(
+        int priority,
+        int weight,
+        ModelReasoningLevel reasoningLevel,
+        int maxContextTokens,
+        int maxOutputTokens,
+        int costTier,
+        int latencyTier)
+    {
+        if (priority is < 0 or > 100000)
+        {
+            return Results.BadRequest("Priority must be between 0 and 100000.");
+        }
+
+        if (weight is < 1 or > 10000)
+        {
+            return Results.BadRequest("Weight must be between 1 and 10000.");
+        }
+
+        if (!Enum.IsDefined(reasoningLevel))
+        {
+            return Results.BadRequest("ReasoningLevel must be None, Low, Medium, or High.");
+        }
+
+        if (maxContextTokens is < 0 or > 10_000_000 ||
+            maxOutputTokens is < 0 or > 10_000_000)
+        {
+            return Results.BadRequest("Token limits must be between 0 and 10000000.");
+        }
+
+        if (costTier is < 0 or > 5 || latencyTier is < 0 or > 5)
+        {
+            return Results.BadRequest("CostTier and LatencyTier must be between 0 (unknown) and 5.");
+        }
+
+        return null;
+    }
+
+    private static async Task ClearOtherDefaultRoutesAsync(ProxyDbContext db, Guid? exceptId)
+    {
+        var defaults = await db.ModelRoutes
+            .Where(x => x.IsDefault && (exceptId == null || x.Id != exceptId.Value))
+            .ToListAsync();
+        foreach (var route in defaults)
+        {
+            route.IsDefault = false;
+        }
     }
 
     private static string? NullIfWhiteSpace(string? value) =>

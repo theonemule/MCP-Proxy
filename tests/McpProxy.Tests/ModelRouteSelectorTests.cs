@@ -137,6 +137,183 @@ public sealed class ModelRouteSelectorTests
         Assert.Equal(backup.Id, only.ProviderId);
     }
 
+    [Fact]
+    public async Task High_reasoning_request_prefers_capable_model_over_lower_policy_priority()
+    {
+        await using var db = CreateDb();
+        var (route, backup) = SeedRoute(db);
+        route.ReasoningLevel = ModelReasoningLevel.Low;
+        db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "deep-reasoner",
+            Priority = 100,
+            Weight = 100,
+            ReasoningLevel = ModelReasoningLevel.High
+        });
+        await db.SaveChangesAsync();
+
+        var selector = new ModelRouteSelector(db, new ModelRoutingState());
+        var candidates = await selector.GetCandidatesAsync(
+            route,
+            ModelRoutingOperation.Chat,
+            new ModelRoutingRequirements(
+                ModelReasoningLevel.High,
+                1000,
+                1000,
+                false,
+                false,
+                false,
+                "general"),
+            default);
+
+        Assert.Equal("deep-reasoner", candidates[0].DownstreamModel);
+        Assert.Equal("primary-model", candidates[1].DownstreamModel);
+    }
+
+    [Fact]
+    public async Task Required_tool_capability_filters_explicitly_incompatible_models()
+    {
+        await using var db = CreateDb();
+        var (route, backup) = SeedRoute(db);
+        route.SupportsTools = false;
+        db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "tool-model",
+            Priority = 100,
+            Weight = 100,
+            SupportsTools = true
+        });
+        await db.SaveChangesAsync();
+
+        var selector = new ModelRouteSelector(db, new ModelRoutingState());
+        var candidates = await selector.GetCandidatesAsync(
+            route,
+            ModelRoutingOperation.Chat,
+            new ModelRoutingRequirements(
+                ModelReasoningLevel.Medium,
+                100,
+                100,
+                true,
+                false,
+                false,
+                "general"),
+            default);
+
+        var only = Assert.Single(candidates);
+        Assert.Equal("tool-model", only.DownstreamModel);
+    }
+
+    [Fact]
+    public async Task Context_limit_filters_models_that_cannot_fit_request()
+    {
+        await using var db = CreateDb();
+        var (route, backup) = SeedRoute(db);
+        route.MaxContextTokens = 4096;
+        db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "long-context-model",
+            Priority = 100,
+            Weight = 100,
+            MaxContextTokens = 131072
+        });
+        await db.SaveChangesAsync();
+
+        var selector = new ModelRouteSelector(db, new ModelRoutingState());
+        var candidates = await selector.GetCandidatesAsync(
+            route,
+            ModelRoutingOperation.Chat,
+            new ModelRoutingRequirements(
+                ModelReasoningLevel.Medium,
+                8000,
+                1000,
+                false,
+                false,
+                false,
+                "general"),
+            default);
+
+        var only = Assert.Single(candidates);
+        Assert.Equal("long-context-model", only.DownstreamModel);
+    }
+
+    [Fact]
+    public async Task Simple_request_prefers_lower_cost_model_when_other_fit_is_equal()
+    {
+        await using var db = CreateDb();
+        var (route, backup) = SeedRoute(db);
+        route.ReasoningLevel = ModelReasoningLevel.Low;
+        route.CostTier = 5;
+        route.LatencyTier = 4;
+        db.Add(new ModelRouteTarget
+        {
+            ModelRouteId = route.Id,
+            ProviderId = backup.Id,
+            Provider = backup,
+            DownstreamModel = "efficient-model",
+            Priority = 0,
+            Weight = 100,
+            ReasoningLevel = ModelReasoningLevel.Low,
+            CostTier = 1,
+            LatencyTier = 1
+        });
+        await db.SaveChangesAsync();
+
+        var selector = new ModelRouteSelector(db, new ModelRoutingState());
+        var candidates = await selector.GetCandidatesAsync(
+            route,
+            ModelRoutingOperation.Chat,
+            new ModelRoutingRequirements(
+                ModelReasoningLevel.Low,
+                100,
+                100,
+                false,
+                false,
+                false,
+                "general"),
+            default);
+
+        Assert.Equal("efficient-model", candidates[0].DownstreamModel);
+    }
+
+    [Fact]
+    public void Request_inference_honors_explicit_reasoning_and_detects_vision_and_tools()
+    {
+        var request = System.Text.Json.Nodes.JsonNode.Parse(
+            """
+            {
+              "reasoning":{"effort":"high"},
+              "messages":[
+                {
+                  "role":"user",
+                  "content":[
+                    {"type":"text","text":"Analyze this architecture"},
+                    {"type":"image_url","image_url":{"url":"https://example.test/image.png"}}
+                  ]
+                }
+              ],
+              "tools":[{"type":"function","function":{"name":"lookup"}}],
+              "response_format":{"type":"json_schema"}
+            }
+            """)!.AsObject();
+
+        var requirements = ModelRoutingRequirements.Infer(request);
+
+        Assert.Equal(ModelReasoningLevel.High, requirements.ReasoningLevel);
+        Assert.True(requirements.RequiresVision);
+        Assert.True(requirements.RequiresTools);
+        Assert.True(requirements.RequiresJsonSchema);
+        Assert.Equal("vision", requirements.Specialty);
+    }
+
     private static ProxyDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<ProxyDbContext>()

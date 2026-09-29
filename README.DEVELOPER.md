@@ -320,9 +320,24 @@ The durable entities remain:
 
 ### Routing policy
 
-`ModelRouteSelector` expands a logical route into compatible candidates for either Chat Completions or generic OpenAI-v1 operations. The route's original provider/model pair is synthesized as priority `0`, weight `100`. Rows from `ModelRouteTargets` are then added as configured. Disabled providers and targets are removed, and providers without the required protocol capability are skipped.
+`ModelRouteSelector` is an intelligent model selector, not primarily a load balancer. Each logical route may contain a primary provider/model plus additional `ModelRouteTarget` candidates. Every candidate can advertise reasoning level, context and output limits, tool calling, vision, JSON-schema support, cost tier, latency tier, specialties, policy priority, and weight.
 
-Targets at the same priority are selected using smooth weighted round-robin from singleton `ModelRoutingState`. Higher priority numbers are failover tiers. The same state tracks consecutive downstream failures by provider/model key. After three failures, a target circuit is open for 30 seconds. State is intentionally process-local in this implementation, so multi-node deployments do not share circuit state.
+For every request the selector derives `ModelRoutingRequirements` from the OpenAI-compatible body. Explicit reasoning effort is honored when present. Otherwise the selector estimates reasoning need from the request content. It also detects tool calls, image inputs, structured-output requirements, requested output limits, approximate input size, and a coarse specialty such as coding, math, vision, creative work, or summarization.
+
+Selection happens in this order:
+
+1. Disabled providers/targets and providers that cannot serve the requested protocol operation are removed.
+2. Explicitly incompatible capabilities and known context/output limits are hard filters.
+3. Remaining models are scored for reasoning fit, specialty fit, unknown required capabilities, and efficiency hints.
+4. Administrative priority orders candidates with the same suitability score.
+5. Weight is used only among candidates tied on suitability and priority, using smooth weighted round-robin.
+6. Retryable provider failures fall through to the next ranked candidate. The existing circuit breaker opens after three consecutive failures for 30 seconds.
+
+This means a high-reasoning model can outrank a lower-priority lightweight model when the request actually needs deeper reasoning, while straightforward work can prefer a cheaper/faster model when capability is otherwise equivalent. Unknown capability metadata remains eligible with a penalty so existing routes continue to work before administrators enrich their metadata.
+
+A route can be marked `IsDefault`. When a raw OpenAI request omits `model`, `OpenAiCompatibilityService` uses the authorized default logical route. Clients or SDKs that require a model string can continue to send a stable alias such as `router` or `auto`. Only one route is kept as the default by the admin API.
+
+`ModelRoutingState` remains process-local. It tracks smooth weighted tie-breaking and provider/model health. Multi-node deployments therefore do not share circuit state in this implementation.
 
 `OpenAiCompatibilityService` retries only failures that are safe candidates for routing failover: HTTP `408`, `409`, `425`, `429`, `5xx`, network failures, timeout failures not caused by caller cancellation, and invalid downstream payloads. OpenAI validation/authorization errors and downstream `400`/`401`/`403`/`404` responses are not retried across providers. Streaming failover is permitted only before the first emitted chunk/event.
 
@@ -341,7 +356,7 @@ The northbound contract deliberately matches OpenAI rather than defining another
 
 For `ModelProviderKind.OpenAiCompatible`, the service clones the incoming OpenAI request, changes only `model` to the private downstream model ID, forces the selected streaming mode, applies the provider credential, and forwards the remaining OpenAI fields unchanged. Responses are returned in the downstream OpenAI shape with `model` rewritten to the public alias.
 
-The default chat path is `/v1/chat/completions`. When a provider base endpoint already ends in `/v1`, including `/openai/v1`, the resolver appends only the requested operation path. The catch-all POST route requires a `model` field, resolves permissions, substitutes the downstream model ID, and forwards the remaining JSON unchanged. For `AwsBedrock`, generic OpenAI operations use `/openai/v1/{operation}` and retain bearer-token or SigV4 authentication.
+The default chat path is `/v1/chat/completions`. When a provider base endpoint already ends in `/v1`, including `/openai/v1`, the resolver appends only the requested operation path. The catch-all POST route resolves the named logical model or the configured default router, applies permissions, substitutes the downstream model ID, and forwards the remaining JSON unchanged. For `AwsBedrock`, generic OpenAI operations use `/openai/v1/{operation}` and retain bearer-token or SigV4 authentication.
 
 ### Native provider adapters
 

@@ -312,7 +312,7 @@ function renderModels() {
       : '<span class="badge text-bg-light border text-dark">Primary only</span>';
     return `
     <tr>
-      <td class="fw-semibold"><code>${escapeHtml(r.publicName)}</code></td>
+      <td class="fw-semibold"><code>${escapeHtml(r.publicName)}</code>${r.isDefault ? ' <span class="badge text-bg-info">Default router</span>' : ""}</td>
       <td>${escapeHtml(r.providerName)}</td>
       <td><code>${escapeHtml(r.downstreamModel)}</code></td>
       <td>${routing}</td>
@@ -336,7 +336,7 @@ function renderModels() {
   el("tab-models").innerHTML =
     pageHeader("bi-cpu", "Model Router",
       '<div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" data-action="open-add-model-route"><i class="bi bi-signpost me-1"></i>Add Model Route</button><button class="btn btn-sm btn-primary" data-action="open-add-model-provider"><i class="bi bi-plus-lg me-1"></i>Add Provider</button></div>') +
-    `<p class="text-muted small">OpenAI-compatible API: <code>/v1</code> with models, Chat Completions, Responses, and generic JSON OpenAI model operations, including SSE streaming. A public model route can span multiple providers. Equal-priority targets share traffic by weight, higher priorities provide failover, and repeatedly failing targets enter a short circuit-breaker cooldown. The older <code>/models/chat</code> endpoint remains for compatibility.</p>
+    `<p class="text-muted small">OpenAI-compatible API: <code>/v1</code> with models, Chat Completions, Responses, and generic JSON OpenAI model operations, including SSE streaming. A public model route can span multiple providers. The router selects targets by task fit, reasoning capability, context and configured policy. Priority and weight refine otherwise suitable choices, and repeatedly failing targets enter a short circuit-breaker cooldown. Full capability metadata is configurable through the admin API. The older <code>/models/chat</code> endpoint remains for compatibility.</p>
     <h6 class="mt-3">Providers</h6>` +
     (state.modelProviders.length ? `
       <table class="table table-sm align-middle bg-white">
@@ -423,6 +423,10 @@ function modelRouteModalHtml(route) {
         <div class="col-md-4"><label class="form-label">Downstream model ID <span class="text-danger">*</span></label>
           <input class="form-control" name="downstreamModel" value="${escapeHtml(route?.downstreamModel || "")}" required></div>
         <div class="col-12"><div class="form-check">
+          <input class="form-check-input" type="checkbox" name="isDefault" id="model-route-default" ${route?.isDefault ? "checked" : ""}>
+          <label class="form-check-label" for="model-route-default">Default intelligent router for OpenAI requests that omit model</label>
+        </div></div>
+        <div class="col-12"><div class="form-check">
           <input class="form-check-input" type="checkbox" name="enabled" id="model-route-enabled" ${route?.enabled !== false ? "checked" : ""}>
           <label class="form-check-label" for="model-route-enabled">Enabled</label>
         </div></div>
@@ -439,7 +443,7 @@ function modelRouteTargetFormHtml(route, target) {
     `<option value="${p.id}" ${target?.providerId === p.id ? "selected" : ""}>${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join("");
 
   return `
-    <p class="text-muted small mb-3">Route <code>${escapeHtml(route.publicName)}</code>. Priority <strong>0</strong> joins the primary load-balancing tier. Higher numbers are failover tiers. Weight controls relative traffic only among targets at the same priority.</p>
+    <p class="text-muted small mb-3">Route <code>${escapeHtml(route.publicName)}</code>. Priority and weight are secondary routing controls. The intelligent selector evaluates task requirements and model capability before using them to refine equivalent candidates.</p>
     <form id="model-route-target-form">
       <div class="row g-3">
         <div class="col-md-5"><label class="form-label">Provider</label>
@@ -498,14 +502,14 @@ function modelRouteTargetsHtml(route) {
     <div class="d-flex justify-content-between align-items-start mb-3">
       <div>
         <div class="fw-semibold"><code>${escapeHtml(route.publicName)}</code></div>
-        <div class="text-muted small">Equal priority = weighted load balancing. Higher priority = failover after lower tiers fail or enter cooldown.</div>
+        <div class="text-muted small">Task suitability is evaluated first. Priority orders equivalent candidates and weight distributes traffic only when suitability and priority are tied.</div>
       </div>
       <button class="btn btn-sm btn-primary" data-action="open-add-model-route-target" data-id="${route.id}"><i class="bi bi-plus-lg me-1"></i>Add Target</button>
     </div>
     <div class="table-responsive">
       <table class="table table-sm align-middle">
         <thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Priority</th><th>Weight</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rows.join("")}</tbody>\n      </table>\n    </div>\n    <div class="alert alert-light border small mb-0">\n      The primary target is the provider/model configured on the route itself. It always participates at priority 0 with weight 100.\n      Streams may fail over only before their first emitted chunk.\n    </div>`;
+        <tbody>${rows.join("")}</tbody>\n      </table>\n    </div>\n    <div class="alert alert-light border small mb-0">\n      The primary target is the provider/model configured on the route itself. Existing routes retain priority 0 and weight 100 defaults unless richer routing metadata is configured through the admin API.\n      Streams may fail over only before their first emitted chunk.\n    </div>`;
 }
 
 function modelPermissionModalHtml() {
@@ -1013,7 +1017,8 @@ const ACTION_HANDLERS = {
           providerId: form.get("providerId"),
           publicName: form.get("publicName"),
           downstreamModel: form.get("downstreamModel"),
-          enabled: form.get("enabled") === "on"
+          enabled: form.get("enabled") === "on",
+          isDefault: form.get("isDefault") === "on"
         });
         showToast("Model route added.");
         closeModal();
@@ -1032,7 +1037,19 @@ const ACTION_HANDLERS = {
           providerId: form.get("providerId"),
           publicName: form.get("publicName"),
           downstreamModel: form.get("downstreamModel"),
-          enabled: form.get("enabled") === "on"
+          enabled: form.get("enabled") === "on",
+          isDefault: form.get("isDefault") === "on",
+          priority: route.priority ?? 0,
+          weight: route.weight ?? 100,
+          reasoningLevel: route.reasoningLevel ?? 2,
+          maxContextTokens: route.maxContextTokens ?? 0,
+          maxOutputTokens: route.maxOutputTokens ?? 0,
+          supportsTools: route.supportsTools ?? null,
+          supportsVision: route.supportsVision ?? null,
+          supportsJsonSchema: route.supportsJsonSchema ?? null,
+          costTier: route.costTier ?? 0,
+          latencyTier: route.latencyTier ?? 0,
+          specialties: route.specialties ?? null
         });
         showToast("Model route updated.");
         closeModal();
@@ -1088,7 +1105,16 @@ const ACTION_HANDLERS = {
           downstreamModel: form.get("downstreamModel"),
           priority: Number(form.get("priority")),
           weight: Number(form.get("weight")),
-          enabled: form.get("enabled") === "on"
+          enabled: form.get("enabled") === "on",
+          reasoningLevel: target.reasoningLevel ?? 2,
+          maxContextTokens: target.maxContextTokens ?? 0,
+          maxOutputTokens: target.maxOutputTokens ?? 0,
+          supportsTools: target.supportsTools ?? null,
+          supportsVision: target.supportsVision ?? null,
+          supportsJsonSchema: target.supportsJsonSchema ?? null,
+          costTier: target.costTier ?? 0,
+          latencyTier: target.latencyTier ?? 0,
+          specialties: target.specialties ?? null
         });
         showToast("Routing target updated.");
         closeModal();

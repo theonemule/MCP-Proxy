@@ -21,7 +21,7 @@ public sealed class ProxyDbContext(DbContextOptions<ProxyDbContext> options) : D
     public DbSet<ModelProvider> ModelProviders => Set<ModelProvider>();
     /// <summary>Public model aliases.</summary>
     public DbSet<ModelRoute> ModelRoutes => Set<ModelRoute>();
-    /// <summary>Additional weighted/failover targets behind public model aliases.</summary>
+    /// <summary>Additional intelligent-routing targets behind public model aliases.</summary>
     public DbSet<ModelRouteTarget> ModelRouteTargets => Set<ModelRouteTarget>();
     /// <summary>Role grants for model providers and routes.</summary>
     public DbSet<ModelPermission> ModelPermissions => Set<ModelPermission>();

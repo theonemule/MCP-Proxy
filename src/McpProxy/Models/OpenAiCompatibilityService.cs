@@ -68,8 +68,8 @@ public sealed class OpenAiCompatibilityService(
     }
 
     /// <summary>
-    /// Forwards any JSON OpenAI v1 POST carrying a model field to a compatible routed target.
-    /// Healthy equal-priority targets share traffic by weight and higher priorities are failover tiers.
+    /// Forwards an OpenAI v1 request to the target best suited to the request. A model may name a
+    /// logical route explicitly, or be omitted when a default route is configured.
     /// </summary>
     public async Task<JsonObject> ForwardOpenAiOperationAsync(
         ClaimsPrincipal user,
@@ -703,19 +703,11 @@ public sealed class OpenAiCompatibilityService(
         CancellationToken cancellationToken)
     {
         var model = request["model"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(model))
-        {
-            throw new OpenAiCompatibilityException(
-                "invalid_request_error",
-                "You must provide a model.",
-                "model",
-                null);
-        }
-
         var logical = await ResolveRouteAsync(user, model, cancellationToken);
         var candidates = await routeSelector.GetCandidatesAsync(
             logical,
             ModelRoutingOperation.OpenAiOperation,
+            request,
             cancellationToken);
         var routes = await FilterAuthorizedTargetsAsync(
             user, logical.Id, candidates, cancellationToken);
@@ -733,15 +725,6 @@ public sealed class OpenAiCompatibilityService(
         CancellationToken cancellationToken)
     {
         var model = request["model"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(model))
-        {
-            throw new OpenAiCompatibilityException(
-                "invalid_request_error",
-                "You must provide a model.",
-                "model",
-                null);
-        }
-
         var logical = await ResolveRouteAsync(user, model, cancellationToken);
         if (request["messages"] is not JsonArray { Count: > 0 } messages)
         {
@@ -755,6 +738,7 @@ public sealed class OpenAiCompatibilityService(
         var candidates = await routeSelector.GetCandidatesAsync(
             logical,
             ModelRoutingOperation.Chat,
+            request,
             cancellationToken);
         var routes = await FilterAuthorizedTargetsAsync(
             user, logical.Id, candidates, cancellationToken);
@@ -787,21 +771,43 @@ public sealed class OpenAiCompatibilityService(
 
     private async Task<ModelRoute> ResolveRouteAsync(
         ClaimsPrincipal user,
-        string publicModel,
+        string? publicModel,
         CancellationToken cancellationToken)
     {
-        var route = await db.ModelRoutes.AsNoTracking()
-            .Include(x => x.Provider)
-            .SingleOrDefaultAsync(
-                x => x.PublicName == publicModel && x.Enabled,
-                cancellationToken);
+        ModelRoute? route;
+        if (string.IsNullOrWhiteSpace(publicModel))
+        {
+            route = await db.ModelRoutes.AsNoTracking()
+                .Include(x => x.Provider)
+                .Where(x => x.IsDefault && x.Enabled)
+                .OrderBy(x => x.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (route is null)
+            {
+                throw new OpenAiCompatibilityException(
+                    "invalid_request_error",
+                    "You must provide a model or configure a default model router.",
+                    "model",
+                    "model_required");
+            }
+        }
+        else
+        {
+            route = await db.ModelRoutes.AsNoTracking()
+                .Include(x => x.Provider)
+                .SingleOrDefaultAsync(
+                    x => x.PublicName == publicModel && x.Enabled,
+                    cancellationToken);
+        }
 
         if (route is null ||
             !await permissions.CanAccessModelRouteAsync(user, route.Id, cancellationToken))
         {
+            var name = string.IsNullOrWhiteSpace(publicModel) ? "default router" : $"model '{publicModel}'";
             throw new OpenAiCompatibilityException(
                 "invalid_request_error",
-                $"The model '{publicModel}' does not exist or you do not have access to it.",
+                $"The {name} does not exist or you do not have access to it.",
                 "model",
                 "model_not_found",
                 StatusCodes.Status404NotFound);

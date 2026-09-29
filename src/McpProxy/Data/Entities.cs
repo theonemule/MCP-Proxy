@@ -245,6 +245,19 @@ public sealed class ModelProvider
     public List<ModelRouteTarget> RouteTargets { get; set; } = [];
 }
 
+/// <summary>Reasoning capability advertised by a model target for intelligent routing.</summary>
+public enum ModelReasoningLevel
+{
+    /// <summary>No dedicated reasoning capability is expected.</summary>
+    None = 0,
+    /// <summary>Suitable for lightweight transformations and straightforward requests.</summary>
+    Low = 1,
+    /// <summary>Suitable for normal multi-step reasoning, coding, and analysis.</summary>
+    Medium = 2,
+    /// <summary>Suitable for difficult, deep, or explicitly high-reasoning requests.</summary>
+    High = 3
+}
+
 /// <summary>A public model alias mapped to a provider-specific model identifier.</summary>
 public sealed class ModelRoute
 {
@@ -260,6 +273,30 @@ public sealed class ModelRoute
     public required string DownstreamModel { get; set; }
     /// <summary>Whether the route may be selected.</summary>
     public bool Enabled { get; set; } = true;
+    /// <summary>Whether requests that omit model should use this logical route.</summary>
+    public bool IsDefault { get; set; }
+    /// <summary>Administrative preference tier for the primary target. Lower values are preferred after suitability.</summary>
+    public int Priority { get; set; }
+    /// <summary>Relative traffic share when multiple equally suitable targets remain tied.</summary>
+    public int Weight { get; set; } = 100;
+    /// <summary>Reasoning capability of the primary target.</summary>
+    public ModelReasoningLevel ReasoningLevel { get; set; } = ModelReasoningLevel.Medium;
+    /// <summary>Maximum total context tokens, or zero when unknown/unbounded.</summary>
+    public int MaxContextTokens { get; set; }
+    /// <summary>Maximum output tokens, or zero when unknown/unbounded.</summary>
+    public int MaxOutputTokens { get; set; }
+    /// <summary>Whether tool/function calling is supported; null means unknown.</summary>
+    public bool? SupportsTools { get; set; }
+    /// <summary>Whether image/vision inputs are supported; null means unknown.</summary>
+    public bool? SupportsVision { get; set; }
+    /// <summary>Whether structured JSON/JSON Schema output is supported; null means unknown.</summary>
+    public bool? SupportsJsonSchema { get; set; }
+    /// <summary>Relative cost tier from 1 (lowest) to 5 (highest), or zero when unknown.</summary>
+    public int CostTier { get; set; }
+    /// <summary>Relative latency tier from 1 (fastest) to 5 (slowest), or zero when unknown.</summary>
+    public int LatencyTier { get; set; }
+    /// <summary>Optional comma-separated specialties such as coding, math, vision, creative, summarization.</summary>
+    public string? Specialties { get; set; }
     /// <summary>UTC creation timestamp.</summary>
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     /// <summary>Role grants that authorize this model alias.</summary>
@@ -292,6 +329,24 @@ public sealed class ModelRouteTarget
     public int Weight { get; set; } = 100;
     /// <summary>Whether this target may receive routed traffic.</summary>
     public bool Enabled { get; set; } = true;
+    /// <summary>Reasoning capability advertised by this target.</summary>
+    public ModelReasoningLevel ReasoningLevel { get; set; } = ModelReasoningLevel.Medium;
+    /// <summary>Maximum total context tokens, or zero when unknown/unbounded.</summary>
+    public int MaxContextTokens { get; set; }
+    /// <summary>Maximum output tokens, or zero when unknown/unbounded.</summary>
+    public int MaxOutputTokens { get; set; }
+    /// <summary>Whether tool/function calling is supported; null means unknown.</summary>
+    public bool? SupportsTools { get; set; }
+    /// <summary>Whether image/vision inputs are supported; null means unknown.</summary>
+    public bool? SupportsVision { get; set; }
+    /// <summary>Whether structured JSON/JSON Schema output is supported; null means unknown.</summary>
+    public bool? SupportsJsonSchema { get; set; }
+    /// <summary>Relative cost tier from 1 (lowest) to 5 (highest), or zero when unknown.</summary>
+    public int CostTier { get; set; }
+    /// <summary>Relative latency tier from 1 (fastest) to 5 (slowest), or zero when unknown.</summary>
+    public int LatencyTier { get; set; }
+    /// <summary>Optional comma-separated specialties such as coding, math, vision, creative, summarization.</summary>
+    public string? Specialties { get; set; }
     /// <summary>UTC creation timestamp.</summary>
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

@@ -296,6 +296,23 @@ public sealed class ModelSchemaUpgradeTests
             var count = Convert.ToInt64(await command.ExecuteScalarAsync());
             Assert.Equal(4, count);
 
+            command.CommandText = """PRAGMA table_info("ModelRoutes");""";
+            var routeColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    routeColumns.Add(reader.GetString(1));
+                }
+            }
+
+            Assert.Contains("IsDefault", routeColumns);
+            Assert.Contains("ReasoningLevel", routeColumns);
+            Assert.Contains("MaxContextTokens", routeColumns);
+            Assert.Contains("SupportsTools", routeColumns);
+            Assert.Contains("CostTier", routeColumns);
+            Assert.Contains("Specialties", routeColumns);
+
             db.ModelProviders.Add(new ModelProvider
             {
                 Name = "Local",
