@@ -51,14 +51,20 @@ public sealed class LlmConnectionOptions
 {
     /// <summary>OpenAI-compatible API base URL.</summary>
     public string Endpoint { get; set; } = string.Empty;
-    /// <summary>API key. Proxy mode may leave this empty to reuse the signed-in user's access token.</summary>
+    /// <summary>
+    /// Bearer credential placed in the OpenAI client's API-key slot. For Proxy this may be a
+    /// gateway mcp_ API key or an OAuth/OIDC access token. Empty Proxy credentials reuse login.
+    /// </summary>
     public string ApiKey { get; set; } = string.Empty;
     /// <summary>Public proxy model alias or hosted provider model/deployment ID.</summary>
     public string Model { get; set; } = string.Empty;
 }
 
 /// <summary>Connection values used to test OpenAI model discovery without first saving settings.</summary>
-public sealed record LlmModelDiscoveryRequest(LlmSource Source, string Endpoint, string? ApiKey);
+public sealed record LlmModelDiscoveryRequest(
+    LlmSource Source,
+    string Endpoint,
+    string? ApiKey);
 
 /// <summary>Switchable proxy/hosted model profiles and shared agent-loop settings.</summary>
 public sealed class LlmOptions

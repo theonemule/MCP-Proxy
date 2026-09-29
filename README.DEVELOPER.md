@@ -421,3 +421,13 @@ The project historically uses `EnsureCreated` rather than EF migrations. Fresh d
 - Provider error bodies are not reflected to the caller.
 
 The test suite covers model authorization, OpenAI model-list shape, direct OpenAI-compatible request preservation, generic `/v1` operation forwarding, Responses-style SSE event preservation, recursive model-alias rewriting, OpenAI bearer API-key parsing, Ollama-to-OpenAI adaptation, Bedrock OpenAI-runtime routing, Bedrock streaming adaptation, SigV4 signing, and database schema upgrades.
+
+### OpenAI bearer-slot credential multiplexing
+
+OpenAI clients place their configured API credential in `Authorization: Bearer <value>`. `OpenAiBearerCredentialClassifier` makes the proxy behavior explicit without changing that wire format.
+
+`Bearer mcp_...` selects `ApiKeyAuthenticationHandler`. Any other non-empty `Bearer` credential selects ASP.NET JWT bearer authentication. In OIDC mode, external access tokens are therefore processed by the configured OIDC/JWT validation path. This allows a user to paste an OAuth/OIDC access token into an OpenAI SDK's `api_key` setting and still authenticate to the proxy.
+
+This is bearer-token compatibility, not generic OAuth token introspection. Opaque tokens that the configured JWT/OIDC bearer handler cannot validate are rejected.
+
+The browser client's Proxy credential field follows the same rule. An explicit value is sent unchanged as the OpenAI SDK bearer credential. If the field is blank, `ChatService` supplies the signed-in user's access token.

@@ -273,8 +273,11 @@ public sealed partial class ChatService(
     {
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            if (apiKey.Length <= 8) return $"API key configured ({apiKey[..Math.Min(2, apiKey.Length)]}***, Length: {apiKey.Length})";
-            return $"API key configured ({apiKey[..4]}...{apiKey[^4..]}, Length: {apiKey.Length})";
+            var kind = apiKey.StartsWith("mcp_", StringComparison.Ordinal)
+                ? "Gateway API key"
+                : "Bearer credential";
+            if (apiKey.Length <= 8) return $"{kind} configured ({apiKey[..Math.Min(2, apiKey.Length)]}***, Length: {apiKey.Length})";
+            return $"{kind} configured ({apiKey[..4]}...{apiKey[^4..]}, Length: {apiKey.Length})";
         }
 
         return string.IsNullOrWhiteSpace(proxyAccessToken)

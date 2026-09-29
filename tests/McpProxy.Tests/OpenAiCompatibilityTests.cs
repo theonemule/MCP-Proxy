@@ -310,6 +310,26 @@ public sealed class OpenAiCompatibilityTests
         }
     }
 
+    [Theory]
+    [InlineData("Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3QifQ.payload.signature")]
+    [InlineData("Bearer oauth-access-token-value")]
+    public void Non_gateway_bearer_credentials_route_to_jwt_or_oidc_authentication(string authorization)
+    {
+        Assert.Equal(
+            OpenAiBearerCredentialKind.BearerToken,
+            OpenAiBearerCredentialClassifier.Classify(authorization));
+    }
+
+    [Fact]
+    public void Gateway_bearer_api_key_routes_to_api_key_authentication()
+    {
+        var generated = ApiKeyGenerator.Generate();
+
+        Assert.Equal(
+            OpenAiBearerCredentialKind.GatewayApiKey,
+            OpenAiBearerCredentialClassifier.Classify("Bearer " + generated.PlaintextKey));
+    }
+
     [Fact]
     public void Gateway_api_keys_can_be_used_as_openai_bearer_tokens()
     {

@@ -9,8 +9,9 @@ namespace McpClient.Services;
 public sealed class LlmClientFactory(ILoggerFactory loggerFactory)
 {
     /// <summary>
-    /// Builds a configured chat client. In proxy mode, <paramref name="proxyAccessToken"/> is used
-    /// when the proxy profile has no explicit API key.
+    /// Builds a configured chat client. The OpenAI SDK places the configured credential in
+    /// Authorization: Bearer. In proxy mode that value may be an mcp_ key or OAuth/OIDC token.
+    /// <paramref name="proxyAccessToken"/> is used when the proxy profile has no explicit value.
     /// </summary>
     public IChatClient Create(LlmOptions settings, string? proxyAccessToken = null)
     {
@@ -43,7 +44,7 @@ public sealed class LlmClientFactory(ILoggerFactory loggerFactory)
         {
             throw new InvalidOperationException(
                 settings.Source == LlmSource.Proxy
-                    ? "Proxy authentication is not configured. Sign in with a proxy-scoped access token or set a proxy API key."
+                    ? "Proxy authentication is not configured. Sign in with a proxy-scoped access token or set a proxy API key / OAuth access token."
                     : "Hosted model API key is not configured.");
         }
 
