@@ -118,12 +118,12 @@ if (authOptions.Enabled)
 
             if (context.Request.Headers.TryGetValue("Authorization", out var authorization))
             {
-                if (ApiKeyGenerator.TryGetBearerApiKey(authorization.ToString(), out _))
+                return OpenAiBearerCredentialClassifier.Classify(authorization.ToString()) switch
                 {
-                    return ApiKeyAuthenticationOptions.SchemeName;
-                }
-
-                return JwtBearerDefaults.AuthenticationScheme;
+                    OpenAiBearerCredentialKind.GatewayApiKey => ApiKeyAuthenticationOptions.SchemeName,
+                    OpenAiBearerCredentialKind.BearerToken => JwtBearerDefaults.AuthenticationScheme,
+                    _ => JwtBearerDefaults.AuthenticationScheme
+                };
             }
 
             return CookieAuthenticationDefaults.AuthenticationScheme;
@@ -141,12 +141,12 @@ if (authOptions.Enabled)
 
             if (context.Request.Headers.TryGetValue("Authorization", out var authorization))
             {
-                if (ApiKeyGenerator.TryGetBearerApiKey(authorization.ToString(), out _))
+                return OpenAiBearerCredentialClassifier.Classify(authorization.ToString()) switch
                 {
-                    return ApiKeyAuthenticationOptions.SchemeName;
-                }
-
-                return JwtBearerDefaults.AuthenticationScheme;
+                    OpenAiBearerCredentialKind.GatewayApiKey => ApiKeyAuthenticationOptions.SchemeName,
+                    OpenAiBearerCredentialKind.BearerToken => JwtBearerDefaults.AuthenticationScheme,
+                    _ => JwtBearerDefaults.AuthenticationScheme
+                };
             }
 
             // OpenAI clients authenticate with Bearer API keys; use the API-key scheme for a

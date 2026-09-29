@@ -68,7 +68,7 @@ export function renderSettings(view) {
             view.querySelector('#llm-proxy-apikey').value = '';
             view.querySelector('#llm-proxy-apikey').placeholder = proxy.apiKeyConfigured
                 ? 'Configured - leave blank to keep'
-                : 'Blank uses your signed-in access token';
+                : 'mcp_ key, OAuth access token, or blank for signed-in token';
 
             view.querySelector('#llm-hosted-endpoint').value = hosted.endpoint ?? '';
             view.querySelector('#llm-hosted-model').value = hosted.model ?? '';
@@ -112,9 +112,12 @@ export function renderSettings(view) {
                 return option;
             }));
 
-            const auth = result.authMode === 'signed-in-access-token'
-                ? 'signed-in access token'
-                : 'API key';
+            const auth = {
+                'signed-in-oauth-token': 'signed-in OAuth access token',
+                'gateway-api-key': 'gateway API key',
+                'oauth-bearer-token': 'pasted OAuth/OIDC bearer token',
+                'api-key': 'API key'
+            }[result.authMode] ?? result.authMode;
             const count = result.models?.length ?? 0;
             alertBox.replaceChildren(el(
                 'div',

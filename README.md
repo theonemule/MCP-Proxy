@@ -1355,3 +1355,17 @@ For Microsoft Foundry v1, register an **OpenAI API compatible** provider with th
 For local Ollama, either register **OpenAI API compatible** against Ollama's `/v1` surface for direct OpenAI endpoint behavior, or use the **Ollama** provider type to retain the native `/api/chat` adapter. OpenAI clients still connect only to the gateway `/v1` URL.
 
 For AWS Bedrock, use the **AWS Bedrock** provider type when the gateway should adapt Converse/ConverseStream or use SigV4. If the selected Bedrock model supports Bedrock's OpenAI-compatible Chat Completions endpoint and a Bedrock bearer API key is available, it may instead be registered as **OpenAI API compatible**.
+
+### OAuth/OIDC bearer credentials in the OpenAI API-key slot
+
+The OpenAI API itself documents API-key authentication using `Authorization: Bearer <api-key>`. MCP Proxy keeps that wire contract but classifies the bearer value. A bearer value beginning with `mcp_` uses gateway API-key authentication. Any other non-empty bearer value is passed to JWT/OIDC bearer validation.
+
+This means an OAuth/OIDC access token can be pasted into an OpenAI SDK's API-key field without requiring a nonstandard header or client transport. The token must still be valid for the proxy's configured bearer authentication. In OIDC mode, that means a token accepted by the configured identity provider/JWT validator. Arbitrary opaque OAuth tokens are not introspected automatically.
+
+In the browser client, the Proxy credential field therefore accepts three modes:
+
+- a gateway `mcp_...` API key
+- a pasted OAuth/OIDC access token
+- blank, which reuses the signed-in user's access token
+
+`Load models` reports which authentication path was used.

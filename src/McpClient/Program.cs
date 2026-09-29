@@ -345,7 +345,13 @@ api.MapPost("/llm-models", async (
     if (discovery.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(credential))
     {
         credential = await tokenProvider.GetTokenAsync(ForwardedToken.AccessToken);
-        authMode = "signed-in-access-token";
+        authMode = "signed-in-oauth-token";
+    }
+    else if (discovery.Source == LlmSource.Proxy)
+    {
+        authMode = credential.StartsWith("mcp_", StringComparison.Ordinal)
+            ? "gateway-api-key"
+            : "oauth-bearer-token";
     }
 
     if (string.IsNullOrWhiteSpace(credential))

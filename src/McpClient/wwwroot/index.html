@@ -218,9 +218,9 @@
                                 <datalist id="llm-proxy-model-list"></datalist>
                             </div>
                             <div>
-                                <label class="form-label" for="llm-proxy-apikey">Proxy API key <span class="text-secondary">(optional)</span></label>
+                                <label class="form-label" for="llm-proxy-apikey">Proxy API key or OAuth token <span class="text-secondary">(optional)</span></label>
                                 <input class="form-control" id="llm-proxy-apikey" type="password" autocomplete="off" placeholder="Blank uses your signed-in access token" />
-                                <div class="form-text">Use a gateway <code>mcp_...</code> key to test API-key auth. Leave blank to test OIDC/RBAC with your current access token.</div>
+                                <div class="form-text">The value is sent as <code>Authorization: Bearer</code>. Use <code>mcp_...</code> for gateway API-key auth, paste an OAuth/OIDC access token to test bearer auth, or leave blank to reuse your current signed-in access token.</div>
                             </div>
                         </div>
                     </div>
