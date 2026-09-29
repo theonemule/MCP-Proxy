@@ -185,21 +185,74 @@
     <div class="overflow-auto">
         <h1 class="h4 mb-3">LLM settings</h1>
         <div id="settings-alert"></div>
-        <form id="settings-form" class="col-lg-8">
+        <form id="settings-form" class="col-xl-10">
+            <div class="mb-4">
+                <label class="form-label">Inference source</label>
+                <div class="btn-group" role="group" aria-label="Inference source">
+                    <input class="btn-check" type="radio" name="llm-source" id="llm-source-proxy" value="Proxy" autocomplete="off" />
+                    <label class="btn btn-outline-primary" for="llm-source-proxy">Proxy</label>
+                    <input class="btn-check" type="radio" name="llm-source" id="llm-source-hosted" value="Hosted" autocomplete="off" />
+                    <label class="btn btn-outline-primary" for="llm-source-hosted">Hosted</label>
+                </div>
+                <div class="form-text">Proxy tests the MCP Proxy OpenAI <code>/v1</code> control plane. Hosted calls the provider directly as a known-good comparison path.</div>
+            </div>
+
             <div class="row g-3">
-                <div class="col-12">
-                    <label class="form-label" for="llm-endpoint">Endpoint</label>
-                    <input class="form-control" id="llm-endpoint" type="url" placeholder="https://api.openai.com/v1" required />
-                    <div class="form-text">Any OpenAI-compatible endpoint, including Azure OpenAI's <code>/openai/v1</code> path.</div>
+                <div class="col-lg-6">
+                    <div class="card h-100" id="llm-proxy-card">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h2 class="h6 mb-0">Proxy model</h2>
+                                <span class="badge text-bg-primary d-none" id="llm-proxy-active">Active</span>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="llm-proxy-endpoint">Endpoint</label>
+                                <input class="form-control" id="llm-proxy-endpoint" type="url" placeholder="http://localhost:5105/v1" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="llm-proxy-model">Public model alias</label>
+                                <div class="input-group">
+                                    <input class="form-control" id="llm-proxy-model" list="llm-proxy-model-list" placeholder="fast-coder" />
+                                    <button class="btn btn-outline-secondary" type="button" id="load-proxy-models">Load models</button>
+                                </div>
+                                <datalist id="llm-proxy-model-list"></datalist>
+                            </div>
+                            <div>
+                                <label class="form-label" for="llm-proxy-apikey">Proxy API key <span class="text-secondary">(optional)</span></label>
+                                <input class="form-control" id="llm-proxy-apikey" type="password" autocomplete="off" placeholder="Blank uses your signed-in access token" />
+                                <div class="form-text">Use a gateway <code>mcp_...</code> key to test API-key auth. Leave blank to test OIDC/RBAC with your current access token.</div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="col-sm-6">
-                    <label class="form-label" for="llm-model">Model</label>
-                    <input class="form-control" id="llm-model" required />
+
+                <div class="col-lg-6">
+                    <div class="card h-100" id="llm-hosted-card">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h2 class="h6 mb-0">Hosted model</h2>
+                                <span class="badge text-bg-primary d-none" id="llm-hosted-active">Active</span>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="llm-hosted-endpoint">Endpoint</label>
+                                <input class="form-control" id="llm-hosted-endpoint" type="url" placeholder="https://provider.example/openai/v1" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="llm-hosted-model">Model / deployment</label>
+                                <div class="input-group">
+                                    <input class="form-control" id="llm-hosted-model" list="llm-hosted-model-list" placeholder="gpt-5.6-terra" />
+                                    <button class="btn btn-outline-secondary" type="button" id="load-hosted-models">Load models</button>
+                                </div>
+                                <datalist id="llm-hosted-model-list"></datalist>
+                            </div>
+                            <div>
+                                <label class="form-label" for="llm-hosted-apikey">Hosted API key</label>
+                                <input class="form-control" id="llm-hosted-apikey" type="password" autocomplete="off" placeholder="Leave blank to keep the current key" />
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="col-sm-6">
-                    <label class="form-label" for="llm-apikey">API key</label>
-                    <input class="form-control" id="llm-apikey" type="password" autocomplete="off" placeholder="Leave blank to keep the current key" />
-                </div>
+
                 <div class="col-12">
                     <label class="form-label" for="llm-system-prompt">System prompt</label>
                     <textarea class="form-control" id="llm-system-prompt" rows="3"></textarea>
@@ -217,14 +270,15 @@
                     <input class="form-control" id="llm-max-iterations" type="number" min="1" required />
                 </div>
             </div>
-            <div class="mt-3">
+            <div class="mt-3 d-flex gap-2 align-items-center">
                 <button type="submit" class="btn btn-primary" id="save-settings">Save</button>
+                <span class="text-secondary small" id="llm-active-summary"></span>
             </div>
         </form>
     </div>
 </template>
 
 <script src="/lib/bootstrap/bootstrap.bundle.min.js"></script>
-<script type="module" src="/js/app.js?v=5"></script>
+<script type="module" src="/js/app.js?v=6"></script>
 </body>
 </html>

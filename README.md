@@ -933,16 +933,16 @@ Treat the server registry as sensitive if it contains an API key. Do not copy li
 
 ### 10.2 Configure the LLM
 
-Set:
+The browser client keeps two independent OpenAI-compatible inference profiles.
 
-- OpenAI-compatible endpoint.
-- Model or deployment name.
-- API key.
-- System prompt.
-- Maximum tool iterations.
-- Optional temperature and output-token limits.
+- **Proxy** points at MCP Proxy, normally `http://localhost:5105/v1`. The model value is the public alias returned by the proxy's `GET /v1/models` endpoint. Leave the proxy API-key field blank to reuse the signed-in user's OIDC access token, or enter a gateway `mcp_...` key to test API-key authentication.
+- **Hosted** calls a model provider directly. This is useful as a known-good comparison path while testing proxy routing. Configure the provider's OpenAI-compatible base URL, model or deployment ID, and API key.
 
-The client validates the endpoint and model before chat begins. If one MCP server is unavailable, the client reports a warning and continues with other available servers.
+The Settings page can switch the active source without overwriting the other profile. **Load models** calls the selected endpoint's `/models` API and populates the model picker, which also provides a lightweight connectivity and authentication test.
+
+System prompt, maximum tool iterations, temperature, and output-token limits are shared by both profiles. New chat turns use whichever source is selected when the request starts.
+
+The client validates the active endpoint and model before chat begins. If one MCP server is unavailable, the client reports a warning and continues with other available servers.
 
 ### 10.3 Use chat
 

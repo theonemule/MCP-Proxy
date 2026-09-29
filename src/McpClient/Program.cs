@@ -1,3 +1,5 @@
+using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Security.Claims;
 using System.Text.Json.Serialization;
 using McpClient.Configuration;
@@ -131,6 +133,10 @@ builder.Services.AddSingleton<LlmClientFactory>();
 // ---------------------------------------------------------------- App services
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHttpClient("mcp");
+builder.Services.AddHttpClient("llm-discovery", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
 builder.Services.AddSingleton<ConversationStore>();
 builder.Services.AddSingleton<McpServerRegistry>();
 builder.Services.AddScoped<UserTokenProvider>();
@@ -288,19 +294,121 @@ api.MapPut("/server-configurations/{id}", (string id, McpServerOptions server, M
 api.MapDelete("/server-configurations/{id}", (string id, McpServerRegistry registry) =>
     registry.Delete(id) ? Results.NoContent() : Results.NotFound());
 
-api.MapGet("/llm-settings", (LlmSettingsStore store) => Results.Ok(store.Get()));
+api.MapGet("/llm-settings", (LlmSettingsStore store) => Results.Ok(PublicLlmSettings(store.Get())));
 
 api.MapPut("/llm-settings", (LlmOptions settings, LlmSettingsStore store) =>
 {
+    var existing = store.Get();
+    settings.Proxy ??= new LlmConnectionOptions();
+    settings.Hosted ??= new LlmConnectionOptions();
+
+    // Password fields are intentionally write-only. Empty means keep the existing credential.
+    if (string.IsNullOrWhiteSpace(settings.Proxy.ApiKey))
+    {
+        settings.Proxy.ApiKey = existing.Proxy.ApiKey;
+    }
+    if (string.IsNullOrWhiteSpace(settings.Hosted.ApiKey))
+    {
+        settings.Hosted.ApiKey = existing.Hosted.ApiKey;
+    }
+
+    NormalizeLlmSettings(settings);
     var error = ValidateLlmSettings(settings);
     if (error is not null)
     {
         return Results.BadRequest(new { error });
     }
 
-    settings.Endpoint = settings.Endpoint.Trim();
-    settings.Model = settings.Model.Trim();
-    return Results.Ok(store.Update(settings));
+    return Results.Ok(PublicLlmSettings(store.Update(settings)));
+});
+
+api.MapPost("/llm-models", async (
+    LlmModelDiscoveryRequest discovery,
+    LlmSettingsStore store,
+    UserTokenProvider tokenProvider,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken cancellationToken) =>
+{
+    if (!Uri.TryCreate(discovery.Endpoint?.Trim(), UriKind.Absolute, out var endpoint)
+        || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
+    {
+        return Results.BadRequest(new { error = $"{discovery.Source} endpoint is not a valid HTTP/HTTPS URL." });
+    }
+
+    var persisted = store.Get();
+    var savedConnection = discovery.Source == LlmSource.Proxy ? persisted.Proxy : persisted.Hosted;
+    var credential = string.IsNullOrWhiteSpace(discovery.ApiKey)
+        ? savedConnection.ApiKey
+        : discovery.ApiKey.Trim();
+
+    var authMode = "api-key";
+    if (discovery.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(credential))
+    {
+        credential = await tokenProvider.GetTokenAsync(ForwardedToken.AccessToken);
+        authMode = "signed-in-access-token";
+    }
+
+    if (string.IsNullOrWhiteSpace(credential))
+    {
+        return Results.BadRequest(new
+        {
+            error = discovery.Source == LlmSource.Proxy
+                ? "No proxy API key is configured and no signed-in access token is available."
+                : "No hosted API key is configured."
+        });
+    }
+
+    var modelsUri = new Uri(discovery.Endpoint.TrimEnd('/') + "/models", UriKind.Absolute);
+    using var request = new HttpRequestMessage(HttpMethod.Get, modelsUri);
+    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
+
+    try
+    {
+        var client = httpClientFactory.CreateClient("llm-discovery");
+        using var response = await client.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var safeBody = body.Length > 1200 ? body[..1200] : body;
+            return Results.Json(new
+            {
+                error = $"Model discovery returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}.",
+                detail = safeBody,
+                endpoint = modelsUri.ToString(),
+                source = discovery.Source.ToString()
+            }, statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        using var document = JsonDocument.Parse(body);
+        var models = document.RootElement.TryGetProperty("data", out var data)
+            && data.ValueKind == JsonValueKind.Array
+            ? data.EnumerateArray()
+                .Where(item => item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetProperty("id").GetString())
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Cast<string>()
+                .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+            : [];
+
+        return Results.Ok(new
+        {
+            source = discovery.Source.ToString(),
+            endpoint = modelsUri.ToString(),
+            authMode,
+            models
+        });
+    }
+    catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+    {
+        return Results.Json(new
+        {
+            error = exception.Message,
+            endpoint = modelsUri.ToString(),
+            source = discovery.Source.ToString()
+        }, statusCode: StatusCodes.Status502BadGateway);
+    }
 });
 
 // The SPA polls this before rendering, so it must be reachable while signed out.
@@ -369,17 +477,39 @@ static string? ValidateServer(McpServerOptions server)
     return null;
 }
 
+static object PublicLlmSettings(LlmOptions settings) => new
+{
+    source = settings.Source,
+    proxy = new
+    {
+        endpoint = settings.Proxy.Endpoint,
+        model = settings.Proxy.Model,
+        apiKeyConfigured = !string.IsNullOrWhiteSpace(settings.Proxy.ApiKey)
+    },
+    hosted = new
+    {
+        endpoint = settings.Hosted.Endpoint,
+        model = settings.Hosted.Model,
+        apiKeyConfigured = !string.IsNullOrWhiteSpace(settings.Hosted.ApiKey)
+    },
+    settings.SystemPrompt,
+    settings.Temperature,
+    settings.MaxOutputTokens,
+    settings.MaxToolIterations
+};
+
 static string? ValidateLlmSettings(LlmOptions settings)
 {
-    if (!Uri.TryCreate(settings.Endpoint, UriKind.Absolute, out var endpoint)
+    var connection = settings.ActiveConnection;
+    if (!Uri.TryCreate(connection.Endpoint, UriKind.Absolute, out var endpoint)
         || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
     {
-        return "Endpoint must be an absolute HTTP or HTTPS URL.";
+        return $"{settings.Source} endpoint must be an absolute HTTP or HTTPS URL.";
     }
 
-    if (string.IsNullOrWhiteSpace(settings.Model))
+    if (string.IsNullOrWhiteSpace(connection.Model))
     {
-        return "Model is required.";
+        return $"{settings.Source} model is required.";
     }
 
     if (settings.MaxToolIterations < 1)
@@ -388,6 +518,20 @@ static string? ValidateLlmSettings(LlmOptions settings)
     }
 
     return null;
+}
+
+static void NormalizeLlmSettings(LlmOptions settings)
+{
+    settings.Proxy ??= new LlmConnectionOptions();
+    settings.Hosted ??= new LlmConnectionOptions();
+
+    settings.Proxy.Endpoint = settings.Proxy.Endpoint.Trim();
+    settings.Proxy.Model = settings.Proxy.Model.Trim();
+    settings.Proxy.ApiKey = settings.Proxy.ApiKey?.Trim() ?? string.Empty;
+
+    settings.Hosted.Endpoint = settings.Hosted.Endpoint.Trim();
+    settings.Hosted.Model = settings.Hosted.Model.Trim();
+    settings.Hosted.ApiKey = settings.Hosted.ApiKey?.Trim() ?? string.Empty;
 }
 
 static void NormalizeServer(McpServerOptions server)

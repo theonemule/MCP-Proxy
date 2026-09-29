@@ -13,6 +13,7 @@ public sealed partial class ChatService(
     LlmSettingsStore llmSettings,
     McpSessionFactory sessionFactory,
     ConversationStore conversations,
+    UserTokenProvider tokenProvider,
     ILogger<ChatService> logger)
 {
     /// <summary>Sends one user message through the configured LLM and available MCP tools.</summary>
@@ -28,7 +29,11 @@ public sealed partial class ChatService(
         CancellationToken cancellationToken)
     {
         var llm = llmSettings.Get();
-        var chatClient = llmClientFactory.Create(llm);
+        var connection = llm.ActiveConnection;
+        var proxyAccessToken = llm.Source == LlmSource.Proxy && string.IsNullOrWhiteSpace(connection.ApiKey)
+            ? await tokenProvider.GetTokenAsync(ForwardedToken.AccessToken)
+            : null;
+        var chatClient = llmClientFactory.Create(llm, proxyAccessToken);
 
         await using var connections = await sessionFactory.ConnectAllAsync(cancellationToken);
 
@@ -57,7 +62,7 @@ public sealed partial class ChatService(
 
         var options = new ChatOptions
         {
-            ModelId = llm.Model,
+            ModelId = connection.Model,
             Temperature = llm.Temperature,
             MaxOutputTokens = llm.MaxOutputTokens,
             Tools = tools.Count > 0 ? [.. tools] : null,
@@ -73,15 +78,16 @@ public sealed partial class ChatService(
             var activeServers = connections.Sessions.Select(s => $"{s.Options.Name} ({s.Options.Endpoint})").ToList();
             logger.LogError(ex,
                 "LLM call failed. Endpoint={Endpoint}, Model={Model}, ApiKeyStatus={ApiKeyStatus}, ActiveServers={ActiveServers}",
-                llm.Endpoint, llm.Model, MaskApiKey(llm.ApiKey), string.Join(", ", activeServers));
+                connection.Endpoint, connection.Model, MaskCredential(connection.ApiKey, proxyAccessToken), string.Join(", ", activeServers));
 
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("LLM Request Failed!");
             sb.AppendLine();
             sb.AppendLine("=== DIAGNOSTIC CONTEXT ===");
-            sb.AppendLine($"• LLM Endpoint:       {llm.Endpoint}");
-            sb.AppendLine($"• Model / Deployment: {llm.Model}");
-            sb.AppendLine($"• API Key Status:     {MaskApiKey(llm.ApiKey)}");
+            sb.AppendLine($"• LLM Source:         {llm.Source}");
+            sb.AppendLine($"• LLM Endpoint:       {connection.Endpoint}");
+            sb.AppendLine($"• Model / Deployment: {connection.Model}");
+            sb.AppendLine($"• Credential Status:  {MaskCredential(connection.ApiKey, proxyAccessToken)}");
             sb.AppendLine($"• Max Tool Iterations:{llm.MaxToolIterations}");
             sb.AppendLine($"• History Messages:   {snapshot.Count}");
             sb.AppendLine($"• Active MCP Servers: {(activeServers.Count > 0 ? string.Join(", ", activeServers) : "None")}");
@@ -263,11 +269,17 @@ public sealed partial class ChatService(
         return records;
     }
 
-    private static string MaskApiKey(string? apiKey)
+    private static string MaskCredential(string? apiKey, string? proxyAccessToken)
     {
-        if (string.IsNullOrWhiteSpace(apiKey)) return "NOT CONFIGURED (Empty)";
-        if (apiKey.Length <= 8) return $"Configured ({apiKey[..Math.Min(2, apiKey.Length)]}***, Length: {apiKey.Length})";
-        return $"Configured ({apiKey[..4]}...{apiKey[^4..]}, Length: {apiKey.Length})";
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            if (apiKey.Length <= 8) return $"API key configured ({apiKey[..Math.Min(2, apiKey.Length)]}***, Length: {apiKey.Length})";
+            return $"API key configured ({apiKey[..4]}...{apiKey[^4..]}, Length: {apiKey.Length})";
+        }
+
+        return string.IsNullOrWhiteSpace(proxyAccessToken)
+            ? "NOT CONFIGURED"
+            : "Using signed-in user's access token";
     }
 
     private static string Serialize(object? value)
