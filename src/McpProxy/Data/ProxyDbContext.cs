@@ -21,6 +21,8 @@ public sealed class ProxyDbContext(DbContextOptions<ProxyDbContext> options) : D
     public DbSet<ModelProvider> ModelProviders => Set<ModelProvider>();
     /// <summary>Public model aliases.</summary>
     public DbSet<ModelRoute> ModelRoutes => Set<ModelRoute>();
+    /// <summary>Additional weighted/failover targets behind public model aliases.</summary>
+    public DbSet<ModelRouteTarget> ModelRouteTargets => Set<ModelRouteTarget>();
     /// <summary>Role grants for model providers and routes.</summary>
     public DbSet<ModelPermission> ModelPermissions => Set<ModelPermission>();
 
@@ -86,6 +88,16 @@ public sealed class ProxyDbContext(DbContextOptions<ProxyDbContext> options) : D
             route.HasIndex(x => x.PublicName).IsUnique();
             route.HasOne(x => x.Provider).WithMany(x => x.Routes)
                 .HasForeignKey(x => x.ProviderId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ModelRouteTarget>(target =>
+        {
+            target.HasOne(x => x.ModelRoute).WithMany(x => x.Targets)
+                .HasForeignKey(x => x.ModelRouteId).OnDelete(DeleteBehavior.Cascade);
+            target.HasOne(x => x.Provider).WithMany(x => x.RouteTargets)
+                .HasForeignKey(x => x.ProviderId).OnDelete(DeleteBehavior.Restrict);
+            target.HasIndex(x => new { x.ModelRouteId, x.ProviderId, x.DownstreamModel }).IsUnique();
+            target.HasIndex(x => new { x.ModelRouteId, x.Priority, x.Enabled });
         });
 
         modelBuilder.Entity<ModelPermission>(permission =>

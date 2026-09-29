@@ -72,6 +72,26 @@ CREATE TABLE IF NOT EXISTS "ModelRoutes" (
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRoutes_PublicName" ON "ModelRoutes" ("PublicName");
 CREATE INDEX IF NOT EXISTS "IX_ModelRoutes_ProviderId" ON "ModelRoutes" ("ProviderId");
 
+CREATE TABLE IF NOT EXISTS "ModelRouteTargets" (
+    "Id" TEXT NOT NULL CONSTRAINT "PK_ModelRouteTargets" PRIMARY KEY,
+    "ModelRouteId" TEXT NOT NULL,
+    "ProviderId" TEXT NOT NULL,
+    "DownstreamModel" TEXT NOT NULL,
+    "Priority" INTEGER NOT NULL,
+    "Weight" INTEGER NOT NULL,
+    "Enabled" INTEGER NOT NULL,
+    "CreatedAt" TEXT NOT NULL,
+    CONSTRAINT "FK_ModelRouteTargets_ModelRoutes_ModelRouteId" FOREIGN KEY ("ModelRouteId")
+        REFERENCES "ModelRoutes" ("Id") ON DELETE CASCADE,
+    CONSTRAINT "FK_ModelRouteTargets_ModelProviders_ProviderId" FOREIGN KEY ("ProviderId")
+        REFERENCES "ModelProviders" ("Id") ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ModelRouteId_ProviderId_DownstreamModel"
+    ON "ModelRouteTargets" ("ModelRouteId", "ProviderId", "DownstreamModel");
+CREATE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ModelRouteId_Priority_Enabled"
+    ON "ModelRouteTargets" ("ModelRouteId", "Priority", "Enabled");
+CREATE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ProviderId" ON "ModelRouteTargets" ("ProviderId");
+
 CREATE TABLE IF NOT EXISTS "ModelPermissions" (
     "Id" TEXT NOT NULL CONSTRAINT "PK_ModelPermissions" PRIMARY KEY,
     "RoleId" TEXT NOT NULL,
@@ -122,6 +142,22 @@ CREATE TABLE IF NOT EXISTS "ModelRoutes" (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRoutes_PublicName" ON "ModelRoutes" ("PublicName");
 CREATE INDEX IF NOT EXISTS "IX_ModelRoutes_ProviderId" ON "ModelRoutes" ("ProviderId");
+
+CREATE TABLE IF NOT EXISTS "ModelRouteTargets" (
+    "Id" uuid NOT NULL PRIMARY KEY,
+    "ModelRouteId" uuid NOT NULL REFERENCES "ModelRoutes" ("Id") ON DELETE CASCADE,
+    "ProviderId" uuid NOT NULL REFERENCES "ModelProviders" ("Id") ON DELETE RESTRICT,
+    "DownstreamModel" text NOT NULL,
+    "Priority" integer NOT NULL,
+    "Weight" integer NOT NULL,
+    "Enabled" boolean NOT NULL,
+    "CreatedAt" timestamp with time zone NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ModelRouteId_ProviderId_DownstreamModel"
+    ON "ModelRouteTargets" ("ModelRouteId", "ProviderId", "DownstreamModel");
+CREATE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ModelRouteId_Priority_Enabled"
+    ON "ModelRouteTargets" ("ModelRouteId", "Priority", "Enabled");
+CREATE INDEX IF NOT EXISTS "IX_ModelRouteTargets_ProviderId" ON "ModelRouteTargets" ("ProviderId");
 
 CREATE TABLE IF NOT EXISTS "ModelPermissions" (
     "Id" uuid NOT NULL PRIMARY KEY,
@@ -174,6 +210,29 @@ BEGIN
     );
     CREATE UNIQUE INDEX [IX_ModelRoutes_PublicName] ON [ModelRoutes] ([PublicName]);
     CREATE INDEX [IX_ModelRoutes_ProviderId] ON [ModelRoutes] ([ProviderId]);
+END;
+
+IF OBJECT_ID(N'[ModelRouteTargets]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [ModelRouteTargets] (
+        [Id] uniqueidentifier NOT NULL CONSTRAINT [PK_ModelRouteTargets] PRIMARY KEY,
+        [ModelRouteId] uniqueidentifier NOT NULL,
+        [ProviderId] uniqueidentifier NOT NULL,
+        [DownstreamModel] nvarchar(450) NOT NULL,
+        [Priority] int NOT NULL,
+        [Weight] int NOT NULL,
+        [Enabled] bit NOT NULL,
+        [CreatedAt] datetimeoffset NOT NULL,
+        CONSTRAINT [FK_ModelRouteTargets_ModelRoutes_ModelRouteId] FOREIGN KEY ([ModelRouteId])
+            REFERENCES [ModelRoutes] ([Id]) ON DELETE CASCADE,
+        CONSTRAINT [FK_ModelRouteTargets_ModelProviders_ProviderId] FOREIGN KEY ([ProviderId])
+            REFERENCES [ModelProviders] ([Id])
+    );
+    CREATE UNIQUE INDEX [IX_ModelRouteTargets_ModelRouteId_ProviderId_DownstreamModel]
+        ON [ModelRouteTargets] ([ModelRouteId], [ProviderId], [DownstreamModel]);
+    CREATE INDEX [IX_ModelRouteTargets_ModelRouteId_Priority_Enabled]
+        ON [ModelRouteTargets] ([ModelRouteId], [Priority], [Enabled]);
+    CREATE INDEX [IX_ModelRouteTargets_ProviderId] ON [ModelRouteTargets] ([ProviderId]);
 END;
 
 IF OBJECT_ID(N'[ModelPermissions]', N'U') IS NULL

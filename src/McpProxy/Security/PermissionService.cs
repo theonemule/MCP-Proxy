@@ -36,6 +36,12 @@ public interface IPermissionService
     /// <summary>True when the caller may use a public model route, directly or through a provider-wide grant.</summary>
     Task<bool> CanAccessModelRouteAsync(ClaimsPrincipal user, Guid modelRouteId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// True when a resolved target provider may receive traffic for a route. Direct route grants
+    /// authorize all internal targets; provider-only access requires a grant on the selected provider.
+    /// </summary>
+    Task<bool> CanAccessModelRouteTargetAsync(ClaimsPrincipal user, Guid modelRouteId, Guid providerId, CancellationToken cancellationToken);
+
     /// <summary>Public model-route ids visible to the caller.</summary>
     Task<IReadOnlySet<Guid>> GetAccessibleModelRouteIdsAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
 }
@@ -200,6 +206,26 @@ public sealed class PermissionService(ProxyDbContext db) : IPermissionService
             p => roleIds.Contains(p.RoleId) &&
                  ((p.Scope == ModelPermissionScope.Route && p.ModelRouteId == modelRouteId) ||
                   (p.Scope == ModelPermissionScope.Provider && p.ProviderId == providerId.Value)),
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> CanAccessModelRouteTargetAsync(
+        ClaimsPrincipal user,
+        Guid modelRouteId,
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        var roleIds = await ResolveRoleIdsAsync(user, cancellationToken);
+        if (roleIds.Count == 0)
+        {
+            return false;
+        }
+
+        return await db.ModelPermissions.AnyAsync(
+            p => roleIds.Contains(p.RoleId) &&
+                 ((p.Scope == ModelPermissionScope.Route && p.ModelRouteId == modelRouteId) ||
+                  (p.Scope == ModelPermissionScope.Provider && p.ProviderId == providerId)),
             cancellationToken);
     }
 
